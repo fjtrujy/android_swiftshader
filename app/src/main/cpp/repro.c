@@ -132,10 +132,11 @@ static ReproStatus run_test(uint8_t* pixels) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // Source texture: 256x256 RGBA8 uploaded via DIRECT glTexImage2D (no PBO,
-    // no glTexStorage2D). Bisect step.
+    // Source texture: 256x256 RGBA8. glTexStorage2D (immutable storage) +
+    // glTexSubImage2D from a CPU pointer (NO PBO). Bisect step.
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
     {
         size_t byteSize = (size_t)SOURCE_SIZE * (size_t)SOURCE_SIZE * 4;
         uint8_t* cpu = (uint8_t*)malloc(byteSize);
@@ -143,8 +144,8 @@ static ReproStatus run_test(uint8_t* pixels) {
         for (size_t i = 0; i < byteSize; i += 4) {
             cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
         }
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SOURCE_SIZE, SOURCE_SIZE, 0,
-                     GL_RGBA, GL_UNSIGNED_BYTE, cpu);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
+                        GL_RGBA, GL_UNSIGNED_BYTE, cpu);
         free(cpu);
     }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -225,6 +226,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: single-thread PBO upload + sample (no worker, no shared context)");
+    LOGI("repro_run_test: single-thread glTexStorage2D + glTexSubImage2D from CPU pointer (no PBO)");
     return run_test(pixels);
 }
