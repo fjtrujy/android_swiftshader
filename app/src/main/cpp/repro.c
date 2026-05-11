@@ -1,19 +1,18 @@
 // The SwiftShader Android-emulator render bug — minimal repro.
 //
 // One JNI entry point invoked from Kotlin (`repro_run_test`) does the entire
-// trigger sequence in a fresh process. Bisect step: SINGLE-THREAD variant —
-// drop the worker pthread + shared context. All GL is on the main context:
-//   - Bring up GLES3 + 1x1 pbuffer.
-//   - Allocate a 256x256 RGBA8 source texture; PBO-upload opaque red via
-//     glMapBufferRange + glUnmapBuffer + glTexSubImage2D from PBO offset 0.
+// trigger sequence in a fresh process. Bisect step: drop the PBO upload path
+// — upload the source texture via DIRECT glTexImage2D from a CPU buffer.
+//   - Bring up GLES3 + 1x1 pbuffer (all on main thread).
+//   - Allocate a 256x256 RGBA8 source texture; glTexImage2D directly from a
+//     malloc'd CPU buffer pre-filled with opaque red.
 //   - Bind a 512x512 RGBA8 destination FBO; draw a full-NDC quad sampling
 //     the source texture; glReadPixels.
 //
 // Expected output: every pixel `(255, 0, 0, 255)`.
-// On the Android emulator with `-gpu swiftshader`: previously shown to give
-// `(0, 0, 0, 0)` when the upload ran on a SHARED context on a worker thread.
-// This run tests whether the same broken pixels appear when the same upload
-// pattern runs on a single main thread context.
+// If swiftshader still gives `(0, 0, 0, 0)`, the bug is in the sample/draw
+// path itself, not the upload. If swiftshader now gives red, PBO upload is
+// the trigger.
 
 #include "repro.h"
 
@@ -28,12 +27,6 @@
 
 #define LOG_TAG "swsrepro"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
-
-// PBO constants — not exposed by the NDK GLES headers we link against.
-#define V_GL_PIXEL_UNPACK_BUFFER       0x88EC
-#define V_GL_MAP_WRITE_BIT             0x0002
-#define V_GL_MAP_INVALIDATE_BUFFER_BIT 0x0008
-#define V_GL_STREAM_DRAW               0x88E0
 
 #define SOURCE_SIZE  256
 #define TARGET_W     512
@@ -139,35 +132,23 @@ static ReproStatus run_test(uint8_t* pixels) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // Source texture: 256x256 RGBA8 uploaded via PBO + glTexSubImage2D
-    // (same upload pattern as before, just on the main context).
+    // Source texture: 256x256 RGBA8 uploaded via DIRECT glTexImage2D (no PBO,
+    // no glTexStorage2D). Bisect step.
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
-
     {
-        GLuint pbo = 0;
-        glGenBuffers(1, &pbo);
-        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
         size_t byteSize = (size_t)SOURCE_SIZE * (size_t)SOURCE_SIZE * 4;
-        glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
-        void* mapped = glMapBufferRange(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
-                                         V_GL_MAP_WRITE_BIT | V_GL_MAP_INVALIDATE_BUFFER_BIT);
-        if (!mapped) {
-            glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
-            glDeleteBuffers(1, &pbo);
-            set_err(&s, "main glMapBufferRange returned NULL"); goto cleanup;
-        }
-        uint8_t* m = (uint8_t*)mapped;
+        uint8_t* cpu = (uint8_t*)malloc(byteSize);
+        if (!cpu) { set_err(&s, "main malloc red buffer"); goto cleanup; }
         for (size_t i = 0; i < byteSize; i += 4) {
-            m[i+0] = 255; m[i+1] = 0; m[i+2] = 0; m[i+3] = 255;
+            cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
         }
-        glUnmapBuffer(V_GL_PIXEL_UNPACK_BUFFER);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
-                        GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)0);
-        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
-        glDeleteBuffers(1, &pbo);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SOURCE_SIZE, SOURCE_SIZE, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, cpu);
+        free(cpu);
     }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     glGenTextures(1, &dst_tex);
     glBindTexture(GL_TEXTURE_2D, dst_tex);
