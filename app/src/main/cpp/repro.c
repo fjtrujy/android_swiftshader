@@ -31,6 +31,7 @@
 // PBO constants — not exposed by the NDK GLES headers we link against.
 #define V_GL_PIXEL_UNPACK_BUFFER       0x88EC
 #define V_GL_STREAM_DRAW               0x88E0
+#define V_GL_MAP_WRITE_BIT             0x0002
 
 #define SOURCE_SIZE  256
 #define TARGET_W     512
@@ -136,31 +137,34 @@ static ReproStatus run_test(uint8_t* pixels) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // Source texture: 256x256 RGBA8. glTexStorage2D (immutable storage) +
-    // PBO upload using glBufferSubData (NOT glMapBufferRange/glUnmapBuffer)
-    // + glTexSubImage2D from PBO offset 0. Bisect step: if bug stays away,
-    // the map/unmap path was the broken piece. If bug reappears, the
-    // upload-from-PBO step itself is broken.
+    // Source texture: 256x256 RGBA8. glTexStorage2D + PBO upload via
+    // glMapBufferRange WITHOUT GL_MAP_INVALIDATE_BUFFER_BIT (just
+    // GL_MAP_WRITE_BIT) + memcpy + glUnmapBuffer. Bisect step.
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
     glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
     {
         size_t byteSize = (size_t)SOURCE_SIZE * (size_t)SOURCE_SIZE * 4;
-        uint8_t* cpu = (uint8_t*)malloc(byteSize);
-        if (!cpu) { set_err(&s, "main malloc red buffer"); goto cleanup; }
-        for (size_t i = 0; i < byteSize; i += 4) {
-            cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
-        }
         GLuint pbo = 0;
         glGenBuffers(1, &pbo);
         glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
         glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
-        glBufferSubData(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize, cpu);
+        void* mapped = glMapBufferRange(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
+                                         V_GL_MAP_WRITE_BIT);  // no INVALIDATE_BUFFER_BIT
+        if (!mapped) {
+            glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
+            glDeleteBuffers(1, &pbo);
+            set_err(&s, "main glMapBufferRange returned NULL"); goto cleanup;
+        }
+        uint8_t* m = (uint8_t*)mapped;
+        for (size_t i = 0; i < byteSize; i += 4) {
+            m[i+0] = 255; m[i+1] = 0; m[i+2] = 0; m[i+3] = 255;
+        }
+        glUnmapBuffer(V_GL_PIXEL_UNPACK_BUFFER);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
                         GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)0);
         glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
         glDeleteBuffers(1, &pbo);
-        free(cpu);
     }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -240,6 +244,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: single-thread PBO via glBufferSubData (no map/unmap) + glTexSubImage2D");
+    LOGI("repro_run_test: single-thread PBO map/unmap (no INVALIDATE_BUFFER_BIT) + glTexSubImage2D");
     return run_test(pixels);
 }
