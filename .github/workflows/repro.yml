@@ -103,7 +103,7 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -no-audio -no-boot-anim -gpu ${{ matrix.gpu }}
           disable-animations: true
           script: |
-            set -euxo pipefail
+            set -eux
 
             # Capture environment for the bug report.
             adb shell getprop ro.product.cpu.abi
