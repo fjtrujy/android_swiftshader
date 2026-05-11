@@ -87,9 +87,11 @@ static const char* FS_TEXTURED_QUAD_SRC =
 
 // ---------------------------------------------------------------------------
 // Phase 1: variant10 — preamble.
-// Bisect step: drop the context — just eglInitialize + eglTerminate on
-// EGL_DEFAULT_DISPLAY. If the bug still reproduces, the trigger is just
-// "an EGL init/terminate cycle on the default display before Phase 2".
+// Bisect step: drop eglTerminate. Just eglGetDisplay + eglInitialize on
+// EGL_DEFAULT_DISPLAY. If the bug stops here, eglTerminate is the actual
+// trigger (and the minimal pattern is Init/Terminate-then-Init-again).
+// If the bug still reproduces, calling eglInitialize twice (preamble +
+// Phase 2's refcounted call) is itself enough.
 // ---------------------------------------------------------------------------
 
 static ReproStatus v10_bare_egl(void) {
@@ -99,10 +101,9 @@ static ReproStatus v10_bare_egl(void) {
     if (display == EGL_NO_DISPLAY) { set_err(&s, "v10 bare eglGetDisplay"); return s; }
     if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "v10 bare eglInitialize"); return s; }
 
-    LOGI("variant10 bare: init+terminate on display %p (no context, no surface, no makeCurrent)",
+    LOGI("variant10 bare: eglInitialize only on display %p (no eglTerminate)",
          (void*)display);
 
-    eglTerminate(display);
     s.success = 1;
     return s;
 }
