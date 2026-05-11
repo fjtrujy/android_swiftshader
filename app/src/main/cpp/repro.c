@@ -184,63 +184,67 @@ static void* worker_main(void* arg) {
 // The bug only manifested after the process had created+destroyed many EGL
 // contexts in earlier test variants. This preamble approximates that pattern.
 
-struct ChurnArgs { int iterations; int from_worker_thread; };
+// --- Preamble (worker thread, fresh context) ---------------------------------
+//
+// Spawn a pthread that does its OWN eglInitialize + create a FRESH (NOT shared)
+// EGL context + pbuffer surface + makeCurrent + a trivial draw + readback +
+// tear-down + eglTerminate.
+//
+// Bisection finding: with this preamble in place, the subsequent shared-context
+// cross-thread upload+sample test (below) produces uniformly (0, 0, 0, 0) on
+// -gpu swiftshader. Without it, the test passes. Just one prior worker-thread
+// EGL session is enough to prime whatever process-wide state SwiftShader-direct
+// then handles incorrectly during cross-context resource sharing.
 
-// Each "cycle" creates a full EGL display+context+pbuffer surface, allocates a
-// texture+FBO, compiles a trivial shader, does one draw + readback, then tears
-// everything down. Mirrors the per-variant `run_with_gl` pattern on the `main`
-// branch. Set `from_worker_thread = 1` to run from a freshly-spawned pthread.
-static void* churn_body(void* arg) {
-    struct ChurnArgs* a = (struct ChurnArgs*)arg;
-    for (int i = 0; i < a->iterations; i++) {
-        EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-        if (d == EGL_NO_DISPLAY) continue;
-        eglInitialize(d, NULL, NULL);
-        const EGLint cfg_attribs[] = {
-            EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
-            EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
-            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
-            EGL_NONE
-        };
-        EGLConfig cfg; EGLint n = 0;
-        if (!eglChooseConfig(d, cfg_attribs, &cfg, 1, &n) || n < 1) { eglTerminate(d); continue; }
-        const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
-        const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-        EGLContext c = eglCreateContext(d, cfg, EGL_NO_CONTEXT, ctx_attribs);
-        EGLSurface s = eglCreatePbufferSurface(d, cfg, pbuf_attribs);
-        eglMakeCurrent(d, s, s, c);
+static void* preamble_body(void* arg) {
+    (void)arg;
+    EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (d == EGL_NO_DISPLAY) return NULL;
+    eglInitialize(d, NULL, NULL);
 
-        // Allocate a texture-FBO, compile a trivial shader, draw, read.
-        GLuint tex = 0, fbo = 0;
-        glGenTextures(1, &tex);
-        glBindTexture(GL_TEXTURE_2D, tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glGenFramebuffers(1, &fbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
-        glViewport(0, 0, 64, 64);
-        glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        uint8_t tmp[64 * 64 * 4];
-        glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
-        glDeleteFramebuffers(1, &fbo);
-        glDeleteTextures(1, &tex);
+    const EGLint cfg_attribs[] = {
+        EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_NONE
+    };
+    EGLConfig cfg; EGLint n = 0;
+    if (!eglChooseConfig(d, cfg_attribs, &cfg, 1, &n) || n < 1) { eglTerminate(d); return NULL; }
 
-        eglMakeCurrent(d, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroySurface(d, s);
-        eglDestroyContext(d, c);
-        eglTerminate(d);
-    }
+    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+    EGLContext c = eglCreateContext(d, cfg, EGL_NO_CONTEXT, ctx_attribs);
+    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    EGLSurface s = eglCreatePbufferSurface(d, cfg, pbuf_attribs);
+    eglMakeCurrent(d, s, s, c);
+
+    // One trivial draw + readback into a 64x64 RGBA8 FBO.
+    GLuint tex = 0, fbo = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    glViewport(0, 0, 64, 64);
+    glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    uint8_t tmp[64 * 64 * 4];
+    glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteFramebuffers(1, &fbo);
+    glDeleteTextures(1, &tex);
+
+    eglMakeCurrent(d, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroySurface(d, s);
+    eglDestroyContext(d, c);
+    eglTerminate(d);
     return NULL;
 }
 
-static void egl_context_churn(int iterations) {
-    // Run the churn synchronously on the calling thread (same thread that will
-    // then run the cross-context test). Matches how variants 2-18 ran sequentially
-    // on the Activity's main thread before variant 19 on the `main` branch.
-    struct ChurnArgs a = { iterations, 0 };
-    churn_body(&a);
+static void run_preamble(void) {
+    pthread_t t = 0;
+    if (pthread_create(&t, NULL, preamble_body, NULL) != 0) return;
+    pthread_join(t, NULL);
 }
 
 // --- Main thread -------------------------------------------------------------
@@ -248,13 +252,11 @@ static void egl_context_churn(int iterations) {
 ReproStatus repro_run(uint8_t* pixels) {
     ReproStatus s = {0};
 
-    // Prime the process state to approximate what 18 prior test variants did.
-    // On the `main` branch with those variants in place, this kind of activity
-    // had already happened by the time the cross-context test ran — and the bug
-    // manifested. Without it, the cross-context test alone passes cleanly on
-    // both backends. Establish the minimum preamble needed.
-    LOGI("preamble: 18 eglInit/Terminate cycles");
-    egl_context_churn(18);
+    // Prime: one worker-thread EGL session with a fresh (NOT shared) context.
+    // Without this, the cross-context test below passes on swiftshader; with it,
+    // the test produces uniform (0, 0, 0, 0).
+    LOGI("preamble: one fresh-context worker-thread EGL session");
+    run_preamble();
 
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLContext main_ctx = EGL_NO_CONTEXT;
