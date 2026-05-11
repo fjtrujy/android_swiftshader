@@ -102,40 +102,7 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -no-audio -no-boot-anim -gpu ${{ matrix.gpu }}
           disable-animations: true
-          script: |
-            set -eux
-
-            # Capture environment for the bug report.
-            adb shell getprop ro.product.cpu.abi
-            adb shell getprop ro.opengles.version
-            adb shell glesinfo 2>/dev/null || true
-            $ANDROID_HOME/emulator/emulator -version | head -3
-
-            # Install + launch.
-            adb install -r app/build/outputs/apk/debug/app-debug.apk
-
-            adb logcat -c
-            adb shell am start -W -n com.example.swsrepro/.MainActivity
-
-            # Wait for the app to finish (it calls finish() after writing both PNGs).
-            for i in $(seq 1 30); do
-              if ! adb shell pidof com.example.swsrepro >/dev/null 2>&1; then
-                echo "app exited after ${i}s"
-                break
-              fi
-              sleep 1
-            done
-
-            # Dump app logs.
-            adb logcat -d 2>/dev/null | grep -E "swsrepro" | grep -v "AppsFilter\|SatelliteApp\|ImsResolver\|WindowManager\|CarrierSvc\|SdkSandbox\|SafetyLabel\|NativePermission\|AS\.Audio\|ShortcutService\|AppWinLayout\|VvmPkg\|CoreBack\|LauncherApps\|ActivityManager\|ProximityAuth\|Finsky" > swsrepro-logcat.txt || true
-            cat swsrepro-logcat.txt
-
-            # Pull artifacts to host.
-            mkdir -p artifacts
-            adb pull /storage/emulated/0/Android/data/com.example.swsrepro/files artifacts/pngs 2>&1 || echo "no PNGs on device"
-            cp swsrepro-logcat.txt artifacts/
-
-            ls -la artifacts/pngs/ || true
+          script: bash ci/run-repro.sh
 
       - name: Upload artifacts
         if: always()
