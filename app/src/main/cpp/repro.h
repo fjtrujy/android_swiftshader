@@ -118,4 +118,32 @@ ReproStatus repro_variant13_instanced_textured_blend(uint8_t* pixels, int width,
 // Expected: bottom half of framebuffer (rows 0..128 with Y-up) red.
 ReproStatus repro_variant14_negative_y_viewport(uint8_t* pixels, int width, int height);
 
+// Variant 15: drawArraysInstanced with per-instance VERTEX ATTRIBUTE (via
+// glVertexAttribDivisor), not gl_InstanceID. The renderer's strokes / textured-
+// rectangles pass instance data this way, not via gl_InstanceID arithmetic.
+// SwiftShader may handle per-instance attribute divisor incorrectly.
+//   - 512x512 RGBA8 target FBO, cleared to (0, 0, 0, 0).
+//   - 256x256 RGBA8 source texture pre-filled with opaque red.
+//   - One 4-vertex VBO for the quad (divisor=0).
+//   - One 16-instance VBO for per-instance tile offsets (divisor=1).
+//   - Vertex shader computes NDC position = tileOffset + quadVertex * tileSize.
+//   - Fragment shader samples source texture.
+//   - glEnable(GL_BLEND) + glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
+//   - glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 16).
+// Requires GLES3.
+// Expected: every pixel == (255, 0, 0, 255).
+ReproStatus repro_variant15_instanced_attribute_divisor(uint8_t* pixels, int width, int height);
+
+// Variant 16: state-pollution sequence. Mirrors the renderer's pattern of
+// (a) first drawing into a large atlas FBO with `viewport(0, -size, 2*size, 2*size)`
+// then (b) drawing to the final output FBO with a normal viewport. SwiftShader may
+// hold onto state from the first draw that breaks the second one.
+//   - Pass 1: bind atlas FBO (256x256), viewport(0, -256, 512, 512), clear, draw a
+//     1-instance quad with .copy blend (mirrors `drawColoredRectangle`).
+//   - Pass 2: bind output FBO (256x256), viewport(0, 0, 256, 256), clear, draw
+//     instanced textured-quad (16 instances, normal blend).
+//   - Read back pass-2 output.
+// Expected: every pixel red (same as variant 13).
+ReproStatus repro_variant16_state_pollution(uint8_t* pixels, int width, int height);
+
 #endif

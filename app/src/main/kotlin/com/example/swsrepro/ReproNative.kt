@@ -69,6 +69,20 @@ object ReproNative {
      */
     @JvmStatic external fun runVariant14(outPixels: ByteArray): String
 
+    /**
+     * Variant 15: drawArraysInstanced with per-instance vertex attribute (divisor=1)
+     * instead of gl_InstanceID. Mirrors the renderer's stroke / textured-rectangle
+     * instancing pattern. `outPixels` must be 512*512*4 bytes.
+     */
+    @JvmStatic external fun runVariant15(outPixels: ByteArray): String
+
+    /**
+     * Variant 16: state-pollution — pass-1 draws with negative-Y viewport, then pass-2
+     * draws with normal viewport. Tests whether SwiftShader carries bad state across.
+     * `outPixels` is the standard 256*256*4.
+     */
+    @JvmStatic external fun runVariant16(outPixels: ByteArray): String
+
     data class Summary(
         val success: Boolean,
         val error: String,

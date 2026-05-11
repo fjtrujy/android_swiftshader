@@ -1112,3 +1112,292 @@ ReproStatus repro_variant14_negative_y_viewport(uint8_t* pixels, int width, int 
          height, width * 2, height * 2, width, height);
     return run_with_gl(2, pixels, width, height, negative_y_viewport);
 }
+
+// ---------------------------------------------------------------------------
+// Variant 15: drawArraysInstanced with per-instance vertex attribute (divisor=1).
+// ---------------------------------------------------------------------------
+
+// Vertex shader: a_pos is per-vertex (divisor 0), a_instanceOffset is per-instance
+// (divisor 1). Positions a 0.5×0.5-NDC tile per instance, tiling 16 instances 4x4.
+static const char* VS_INSTANCE_ATTRIBUTE_SRC =
+    "#version 300 es\n"
+    "in vec2 a_pos;            // per-vertex, divisor=0\n"
+    "in vec2 a_instanceOffset; // per-instance, divisor=1 (NDC offset for this tile)\n"
+    "in vec2 a_uv;             // per-vertex, divisor=0\n"
+    "out vec2 v_uv;\n"
+    "void main() {\n"
+    "  vec2 ndc = a_instanceOffset + 0.5 * (a_pos * 0.5 + 0.5);\n"
+    "  gl_Position = vec4(ndc, 0.0, 1.0);\n"
+    "  v_uv = a_uv;\n"
+    "}\n";
+
+static ReproStatus instanced_attribute_divisor(uint8_t* pixels, int width, int height) {
+    (void)width; (void)height;
+    ReproStatus s = {0};
+    GLuint src_tex = 0, dst_tex = 0, fbo = 0, vs = 0, fs = 0, program = 0;
+    GLuint vbo_quad = 0, vbo_instance = 0;
+
+    const int W = SWSREPRO_V7_WIDTH;
+    const int H = SWSREPRO_V7_HEIGHT;
+
+    // 1. Source texture: 256x256 RGBA8 pre-filled with opaque red.
+    size_t src_bytes = SWSREPRO_V13_SOURCE_SIZE * SWSREPRO_V13_SOURCE_SIZE * 4;
+    uint8_t* src_pixels = malloc(src_bytes);
+    if (!src_pixels) { set_err(&s, "v15 malloc"); goto cleanup; }
+    for (size_t i = 0; i < src_bytes; i += 4) {
+        src_pixels[i+0] = 255; src_pixels[i+1] = 0; src_pixels[i+2] = 0; src_pixels[i+3] = 255;
+    }
+    glGenTextures(1, &src_tex);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SWSREPRO_V13_SOURCE_SIZE, SWSREPRO_V13_SOURCE_SIZE,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, src_pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // 2. Target FBO.
+    glGenTextures(1, &dst_tex);
+    glBindTexture(GL_TEXTURE_2D, dst_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
+    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) { set_err(&s, "v15 FBO incomplete"); goto cleanup; }
+
+    // 3. Program.
+    vs = compile_shader(GL_VERTEX_SHADER, VS_INSTANCE_ATTRIBUTE_SRC, &s); if (!vs) goto cleanup;
+    fs = compile_shader(GL_FRAGMENT_SHADER, FS_TEXTURE_SAMPLE_ES3_SRC, &s); if (!fs) goto cleanup;
+    program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "a_pos");
+    glBindAttribLocation(program, 1, "a_instanceOffset");
+    glBindAttribLocation(program, 2, "a_uv");
+    glLinkProgram(program);
+    GLint linked = 0; glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[256] = {0}; glGetProgramInfoLog(program, sizeof(log) - 1, NULL, log);
+        char buf[256]; snprintf(buf, sizeof(buf), "v15 link failed: %s", log);
+        set_err(&s, buf); goto cleanup;
+    }
+    glUseProgram(program);
+
+    // 4. Per-vertex VBO (4 verts, divisor=0): position + uv interleaved.
+    static const GLfloat quadVerts[] = {
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f, -1.0f, 1.0f, 0.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+    };
+    glGenBuffers(1, &vbo_quad);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_quad);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), NULL);
+    glVertexAttribDivisor(0, 0);
+    glEnableVertexAttribArray(2);
+    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+                          (const void*)(2 * sizeof(GLfloat)));
+    glVertexAttribDivisor(2, 0);
+
+    // 5. Per-instance VBO (16 entries, divisor=1): NDC offset for each tile.
+    GLfloat instanceOffsets[32]; // 16 entries × vec2
+    for (int row = 0; row < 4; row++) {
+        for (int col = 0; col < 4; col++) {
+            int i = row * 4 + col;
+            instanceOffsets[i * 2 + 0] = -1.0f + (float)col * 0.5f;
+            instanceOffsets[i * 2 + 1] = -1.0f + (float)row * 0.5f;
+        }
+    }
+    glGenBuffers(1, &vbo_instance);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_instance);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(instanceOffsets), instanceOffsets, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glVertexAttribDivisor(1, 1); // THE KEY CALL — advance once per instance, not vertex.
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    GLint u_tex = glGetUniformLocation(program, "u_tex");
+    glUniform1i(u_tex, 0);
+
+    glViewport(0, 0, W, H);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // The smoking-gun call.
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 16);
+    glFinish();
+
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(&s, "v15 readback")) goto cleanup;
+
+    s.success = 1;
+
+cleanup:
+    free(src_pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (vbo_quad) glDeleteBuffers(1, &vbo_quad);
+    if (vbo_instance) glDeleteBuffers(1, &vbo_instance);
+    if (program) glDeleteProgram(program);
+    if (vs) glDeleteShader(vs);
+    if (fs) glDeleteShader(fs);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (src_tex) glDeleteTextures(1, &src_tex);
+    if (dst_tex) glDeleteTextures(1, &dst_tex);
+    return s;
+}
+
+ReproStatus repro_variant15_instanced_attribute_divisor(uint8_t* pixels, int width, int height) {
+    LOGI("variant15: drawArraysInstanced(... 16) with glVertexAttribDivisor(1, 1) per-instance attr, %dx%d", width, height);
+    return run_with_gl(3, pixels, width, height, instanced_attribute_divisor);
+}
+
+// ---------------------------------------------------------------------------
+// Variant 16: state-pollution: previous negative-Y-viewport draw then a normal one.
+// ---------------------------------------------------------------------------
+
+static ReproStatus state_pollution(uint8_t* pixels, int width, int height) {
+    ReproStatus s = {0};
+    GLuint src_tex = 0, atlas_tex = 0, atlas_fbo = 0, out_tex = 0, out_fbo = 0;
+    GLuint vs_uniform = 0, fs_uniform = 0, program_uniform = 0;
+    GLuint vs_textured = 0, fs_textured = 0, program_textured = 0;
+    GLuint vbo_pos = 0, vbo_full = 0;
+
+    // 1. Source texture for pass 2: opaque red.
+    size_t src_bytes = (size_t)width * (size_t)height * 4;
+    uint8_t* src_pixels = malloc(src_bytes);
+    if (!src_pixels) { set_err(&s, "v16 malloc"); goto cleanup; }
+    for (size_t i = 0; i < src_bytes; i += 4) {
+        src_pixels[i+0] = 255; src_pixels[i+1] = 0; src_pixels[i+2] = 0; src_pixels[i+3] = 255;
+    }
+    glGenTextures(1, &src_tex);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, src_pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    // 2. Atlas FBO (pass-1 target).
+    glGenTextures(1, &atlas_tex);
+    glBindTexture(GL_TEXTURE_2D, atlas_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &atlas_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, atlas_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, atlas_tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        set_err(&s, "v16 atlas FBO incomplete"); goto cleanup;
+    }
+
+    // 3. Output FBO (pass-2 target).
+    glGenTextures(1, &out_tex);
+    glBindTexture(GL_TEXTURE_2D, out_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &out_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, out_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, out_tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        set_err(&s, "v16 out FBO incomplete"); goto cleanup;
+    }
+
+    // 4. Programs.
+    vs_uniform = compile_shader(GL_VERTEX_SHADER, VS_OFFSET_QUAD_SRC, &s); if (!vs_uniform) goto cleanup;
+    fs_uniform = compile_shader(GL_FRAGMENT_SHADER, FS_UNIFORM_COLOR_SRC, &s); if (!fs_uniform) goto cleanup;
+    program_uniform = glCreateProgram();
+    glAttachShader(program_uniform, vs_uniform);
+    glAttachShader(program_uniform, fs_uniform);
+    glBindAttribLocation(program_uniform, 0, "a_pos");
+    glLinkProgram(program_uniform);
+
+    vs_textured = compile_shader(GL_VERTEX_SHADER, VS_INSTANCED_GRID_SRC, &s); if (!vs_textured) goto cleanup;
+    fs_textured = compile_shader(GL_FRAGMENT_SHADER, FS_TEXTURE_SAMPLE_ES3_SRC, &s); if (!fs_textured) goto cleanup;
+    program_textured = glCreateProgram();
+    glAttachShader(program_textured, vs_textured);
+    glAttachShader(program_textured, fs_textured);
+    glBindAttribLocation(program_textured, 0, "a_pos");
+    glBindAttribLocation(program_textured, 1, "a_uv");
+    glLinkProgram(program_textured);
+
+    static const GLfloat fullQuadPos[] = {-1.f, -1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f};
+    glGenBuffers(1, &vbo_pos);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(fullQuadPos), fullQuadPos, GL_STATIC_DRAW);
+
+    static const GLfloat fullQuadInter[] = {
+        -1.f, -1.f, 0.f, 0.f,
+         1.f, -1.f, 1.f, 0.f,
+        -1.f,  1.f, 0.f, 1.f,
+         1.f,  1.f, 1.f, 1.f,
+    };
+    glGenBuffers(1, &vbo_full);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_full);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(fullQuadInter), fullQuadInter, GL_STATIC_DRAW);
+
+    // === Pass 1: atlas FBO, negative-Y viewport, .copy blend, uniform-color draw ===
+    glBindFramebuffer(GL_FRAMEBUFFER, atlas_fbo);
+    glViewport(0, -height, width * 2, height * 2); // The renderer's atlas viewport pattern
+    glUseProgram(program_uniform);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_pos);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+    glDisable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ZERO);
+    glClearColor(1.f, 1.f, 1.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    GLint u_color = glGetUniformLocation(program_uniform, "u_color");
+    glUniform4f(u_color, 0.f, 0.f, 0.f, 0.f);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glFinish();
+
+    // === Pass 2: output FBO, normal viewport, textured-instanced draw ===
+    glBindFramebuffer(GL_FRAMEBUFFER, out_fbo);
+    glViewport(0, 0, width, height);
+    glUseProgram(program_textured);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_full);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), NULL);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+                          (const void*)(2 * sizeof(GLfloat)));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    GLint u_tex = glGetUniformLocation(program_textured, "u_tex");
+    glUniform1i(u_tex, 0);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 16);
+    glFinish();
+
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(&s, "v16 readback")) goto cleanup;
+
+    s.success = 1;
+
+cleanup:
+    free(src_pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (vbo_full) glDeleteBuffers(1, &vbo_full);
+    if (vbo_pos) glDeleteBuffers(1, &vbo_pos);
+    if (program_uniform) glDeleteProgram(program_uniform);
+    if (vs_uniform) glDeleteShader(vs_uniform);
+    if (fs_uniform) glDeleteShader(fs_uniform);
+    if (program_textured) glDeleteProgram(program_textured);
+    if (vs_textured) glDeleteShader(vs_textured);
+    if (fs_textured) glDeleteShader(fs_textured);
+    if (out_fbo) glDeleteFramebuffers(1, &out_fbo);
+    if (out_tex) glDeleteTextures(1, &out_tex);
+    if (atlas_fbo) glDeleteFramebuffers(1, &atlas_fbo);
+    if (atlas_tex) glDeleteTextures(1, &atlas_tex);
+    if (src_tex) glDeleteTextures(1, &src_tex);
+    return s;
+}
+
+ReproStatus repro_variant16_state_pollution(uint8_t* pixels, int width, int height) {
+    LOGI("variant16: pass1 negative-Y viewport draw then pass2 normal instanced draw (%dx%d)", width, height);
+    return run_with_gl(3, pixels, width, height, state_pollution);
+}
