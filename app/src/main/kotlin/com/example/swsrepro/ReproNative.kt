@@ -90,6 +90,9 @@ object ReproNative {
      */
     @JvmStatic external fun runVariant17(outPixels: ByteArray): String
 
+    /** Variant 18: drawArraysInstanced + sampler2DArray with per-instance layer. */
+    @JvmStatic external fun runVariant18(outPixels: ByteArray): String
+
     data class Summary(
         val success: Boolean,
         val error: String,

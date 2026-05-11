@@ -61,6 +61,10 @@ class MainActivity : Activity() {
             "variant17", outDir, ReproNative::runVariant17,
             width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
         )
+        runByteArrayVariant(
+            "variant18", outDir, ReproNative::runVariant18,
+            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
+        )
 
         Log.i(tag, "all variants finished")
         finish()

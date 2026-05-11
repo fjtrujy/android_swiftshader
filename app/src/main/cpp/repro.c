@@ -1564,3 +1564,155 @@ ReproStatus repro_variant17_sampler_array_dynamic_index(uint8_t* pixels, int wid
     LOGI("variant17: drawArraysInstanced + sampler2D[2] array indexed by per-instance int attr (%dx%d)", width, height);
     return run_with_gl(3, pixels, width, height, sampler_array_dynamic_index);
 }
+
+// ---------------------------------------------------------------------------
+// Variant 18: drawArraysInstanced + sampler2DArray with per-instance layer index.
+// ---------------------------------------------------------------------------
+
+static const char* VS_2D_ARRAY_SRC =
+    "#version 300 es\n"
+    "in vec2 a_pos;\n"
+    "in vec2 a_uv;\n"
+    "in int a_layer;\n"
+    "out vec2 v_uv;\n"
+    "flat out int v_layer;\n"
+    "void main() {\n"
+    "  float col = float(gl_InstanceID % 4);\n"
+    "  float row = float(gl_InstanceID / 4);\n"
+    "  vec2 tileMin = vec2(-1.0 + col * 0.5, -1.0 + row * 0.5);\n"
+    "  vec2 ndc = tileMin + 0.5 * (a_pos * 0.5 + 0.5);\n"
+    "  gl_Position = vec4(ndc, 0.0, 1.0);\n"
+    "  v_uv = a_uv;\n"
+    "  v_layer = a_layer;\n"
+    "}\n";
+
+static const char* FS_2D_ARRAY_SRC =
+    "#version 300 es\n"
+    "precision mediump float;\n"
+    "precision mediump sampler2DArray;\n"
+    "in vec2 v_uv;\n"
+    "flat in int v_layer;\n"
+    "uniform sampler2DArray u_layers;\n"
+    "out vec4 o_color;\n"
+    "void main() {\n"
+    "  o_color = texture(u_layers, vec3(v_uv, float(v_layer)));\n"
+    "}\n";
+
+static ReproStatus sampler_2d_array(uint8_t* pixels, int width, int height) {
+    (void)width; (void)height;
+    ReproStatus s = {0};
+    GLuint src_array = 0, dst_tex = 0, fbo = 0;
+    GLuint vs = 0, fs = 0, program = 0, vbo_pv = 0, vbo_inst = 0;
+
+    const int W = SWSREPRO_V7_WIDTH;
+    const int H = SWSREPRO_V7_HEIGHT;
+    const int SRC = SWSREPRO_V13_SOURCE_SIZE;
+    const int LAYERS = 2;
+
+    // Build red pixel data, then glTexImage3D it into a sampler2DArray with 2 layers.
+    size_t layer_bytes = (size_t)SRC * (size_t)SRC * 4;
+    size_t total_bytes = layer_bytes * LAYERS;
+    uint8_t* layer_pixels = malloc(total_bytes);
+    if (!layer_pixels) { set_err(&s, "v18 malloc"); goto cleanup; }
+    for (size_t i = 0; i < total_bytes; i += 4) {
+        layer_pixels[i+0] = 255; layer_pixels[i+1] = 0; layer_pixels[i+2] = 0; layer_pixels[i+3] = 255;
+    }
+
+    glGenTextures(1, &src_array);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, src_array);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, SRC, SRC, LAYERS, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, layer_pixels);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    glGenTextures(1, &dst_tex);
+    glBindTexture(GL_TEXTURE_2D, dst_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        set_err(&s, "v18 FBO incomplete"); goto cleanup;
+    }
+
+    vs = compile_shader(GL_VERTEX_SHADER, VS_2D_ARRAY_SRC, &s); if (!vs) goto cleanup;
+    fs = compile_shader(GL_FRAGMENT_SHADER, FS_2D_ARRAY_SRC, &s); if (!fs) goto cleanup;
+    program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "a_pos");
+    glBindAttribLocation(program, 1, "a_uv");
+    glBindAttribLocation(program, 2, "a_layer");
+    glLinkProgram(program);
+    GLint linked = 0; glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[256] = {0}; glGetProgramInfoLog(program, sizeof(log) - 1, NULL, log);
+        char buf[256]; snprintf(buf, sizeof(buf), "v18 link failed: %s", log);
+        set_err(&s, buf); goto cleanup;
+    }
+    glUseProgram(program);
+
+    static const GLfloat quadVerts[] = {
+        -1.f, -1.f, 0.f, 0.f,
+         1.f, -1.f, 1.f, 0.f,
+        -1.f,  1.f, 0.f, 1.f,
+         1.f,  1.f, 1.f, 1.f,
+    };
+    glGenBuffers(1, &vbo_pv);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_pv);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quadVerts), quadVerts, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), NULL);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+                          (const void*)(2 * sizeof(GLfloat)));
+
+    GLint layers[16];
+    for (int i = 0; i < 16; i++) layers[i] = i & 1;
+    glGenBuffers(1, &vbo_inst);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo_inst);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(layers), layers, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(2);
+    glVertexAttribIPointer(2, 1, GL_INT, 0, NULL);
+    glVertexAttribDivisor(2, 1);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, src_array);
+    GLint u_layers_loc = glGetUniformLocation(program, "u_layers");
+    glUniform1i(u_layers_loc, 0);
+
+    glViewport(0, 0, W, H);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, 16);
+    glFinish();
+
+    glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(&s, "v18 readback")) goto cleanup;
+
+    s.success = 1;
+
+cleanup:
+    free(layer_pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (vbo_pv) glDeleteBuffers(1, &vbo_pv);
+    if (vbo_inst) glDeleteBuffers(1, &vbo_inst);
+    if (program) glDeleteProgram(program);
+    if (vs) glDeleteShader(vs);
+    if (fs) glDeleteShader(fs);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (src_array) glDeleteTextures(1, &src_array);
+    if (dst_tex) glDeleteTextures(1, &dst_tex);
+    return s;
+}
+
+ReproStatus repro_variant18_sampler_2d_array(uint8_t* pixels, int width, int height) {
+    LOGI("variant18: drawArraysInstanced + sampler2DArray with per-instance layer (%dx%d)", width, height);
+    return run_with_gl(3, pixels, width, height, sampler_2d_array);
+}

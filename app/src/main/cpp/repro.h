@@ -147,18 +147,20 @@ ReproStatus repro_variant15_instanced_attribute_divisor(uint8_t* pixels, int wid
 ReproStatus repro_variant16_state_pollution(uint8_t* pixels, int width, int height);
 
 // Variant 17: drawArraysInstanced sampling from a `sampler2D[N]` array indexed by
-// a per-instance vertex attribute. The renderer's `drawTexturedRectangles` shader
-// (program 34 in the trace) accepts heterogeneous `uniqueTextures` array and indexes
-// into it via per-instance data. Dynamic indexing of sampler arrays is a historic
-// weak spot in GL implementations.
-//   - 512x512 RGBA8 target FBO, cleared to (0, 0, 0, 0).
-//   - 2 source textures (TEXTURE0, TEXTURE1) each pre-filled with opaque red.
-//   - Shader: `uniform sampler2D u_textures[2]; in int v_tex_index; ...
-//             color = texture(u_textures[v_tex_index], v_uv);`
-//   - Per-instance attribute supplies tex_index (0 or 1) per instance.
-//   - 16 instances tile NDC [-1, 1] in a 4x4 grid.
+// a per-instance vertex attribute. RULED OUT — swiftshader handled this correctly,
+// swangle rejected at compile (stricter spec validator). Renderer's real shader
+// must use a different pattern.
+ReproStatus repro_variant17_sampler_array_dynamic_index(uint8_t* pixels, int width, int height);
+
+// Variant 18: drawArraysInstanced sampling from a `sampler2DArray` with per-instance
+// layer index. The standard GLES 3.0 way to "select among N textures per instance".
+//   - 512x512 RGBA8 target FBO.
+//   - One sampler2DArray texture (3D = width x height x depth) with 2 layers, each
+//     filled with opaque red (via glTexImage3D).
+//   - Per-instance int attribute provides layer index (alternating 0, 1).
+//   - 16 instances, 4x4 grid.
 //   - Normal alpha blend, glDrawArraysInstanced(..., 16).
 // Expected: every pixel red.
-ReproStatus repro_variant17_sampler_array_dynamic_index(uint8_t* pixels, int width, int height);
+ReproStatus repro_variant18_sampler_2d_array(uint8_t* pixels, int width, int height);
 
 #endif
