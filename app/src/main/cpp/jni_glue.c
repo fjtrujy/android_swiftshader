@@ -152,6 +152,20 @@ Java_com_example_swsrepro_ReproNative_runVariant12(JNIEnv* env, jclass clazz, jb
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant13(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    // Variant 13 uses a 512x512 target (mirrors renderer's page size).
+    return run_v512_variant(env, out_pixels, "variant13", repro_variant13_instanced_textured_blend);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant14(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    // Variant 14 uses 256x256 — viewport is then (0, -256, 512, 512).
+    return run_bytearray_variant(env, out_pixels, repro_variant14_negative_y_viewport);
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_example_swsrepro_ReproNative_runVariant7(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
     (void)clazz;
     const int W = SWSREPRO_V7_WIDTH, H = SWSREPRO_V7_HEIGHT;

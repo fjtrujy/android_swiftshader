@@ -93,4 +93,29 @@ ReproStatus repro_variant11_chained_frame(uint8_t* pixels, int width, int height
 // Expected: same as variant 11.
 ReproStatus repro_variant12_multiframe_loop(uint8_t* pixels, int width, int height);
 
+// Variant 13: instanced textured draw + normal alpha blend. Distilled from the GL trace
+// of the GoodNotes Renderer's final composite step on the failing scene:
+//   - 512x512 RGBA8 target FBO, cleared to (0, 0, 0, 0).
+//   - 256x256 RGBA8 source texture pre-filled with opaque red (via glTexImage2D).
+//   - Vertex shader uses gl_InstanceID to position 16 quads in a 4x4 grid covering NDC
+//     [-1, 1].
+//   - Fragment shader samples from the source texture.
+//   - glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
+//   - glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, instanceCount=16).
+// Requires GLES3 (gl_InstanceID).
+// Expected: every pixel == (255, 0, 0, 255).
+ReproStatus repro_variant13_instanced_textured_blend(uint8_t* pixels, int width, int height);
+
+// Variant 14: negative-Y viewport. The renderer's atlas-write path issues
+//   `glViewport(0, -2048, 4096, 4096)` on a 2048x2048 framebuffer — viewport origin
+// negative, viewport extends past the framebuffer. Spec-legal but historically a
+// weak spot in software rasterizers. This variant minimises that:
+//   - 256x256 RGBA8 target FBO.
+//   - glViewport(0, -256, 512, 512) — half above, half below the framebuffer.
+//   - glClear to (0, 0, 0, 0).
+//   - Draw a full-NDC red quad. Half the quad falls outside the framebuffer; the
+//     remaining half should still rasterize red into the bottom half of the framebuffer.
+// Expected: bottom half of framebuffer (rows 0..128 with Y-up) red.
+ReproStatus repro_variant14_negative_y_viewport(uint8_t* pixels, int width, int height);
+
 #endif

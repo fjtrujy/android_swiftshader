@@ -55,6 +55,20 @@ object ReproNative {
     /** Variant 12: chained-frame loop x50 against the same GL context. */
     @JvmStatic external fun runVariant12(outPixels: ByteArray): String
 
+    /**
+     * Variant 13: 512x512 target FBO + 256x256 red source texture, sampled by a 4x4 grid
+     * of 16 instances via drawArraysInstanced, with normal alpha blend. Mirrors the
+     * renderer's failing draw call. `outPixels` must be 512*512*4 bytes.
+     */
+    @JvmStatic external fun runVariant13(outPixels: ByteArray): String
+
+    /**
+     * Variant 14: 256x256 FBO with `glViewport(0, -256, 512, 512)` — viewport origin
+     * negative, viewport extends past the framebuffer. Mirrors the renderer's atlas-
+     * write viewport trick. `outPixels` is the standard 256*256*4.
+     */
+    @JvmStatic external fun runVariant14(outPixels: ByteArray): String
+
     data class Summary(
         val success: Boolean,
         val error: String,
