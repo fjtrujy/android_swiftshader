@@ -87,11 +87,9 @@ static const char* FS_TEXTURED_QUAD_SRC =
 
 // ---------------------------------------------------------------------------
 // Phase 1: variant10 — preamble.
-// Bisect step: drop eglMakeCurrent + glGetString from the bare-EGL sequence.
-// Create + destroy a transient context and pbuffer surface without ever
-// binding them. If the bug still reproduces, the trigger doesn't even
-// require the secondary context to be made current — just its existence
-// in the EGL state before Phase 2 starts.
+// Bisect step: drop the pbuffer surface — just create + destroy an EGL
+// context. If the bug still reproduces, the trigger needs only a transient
+// EGL context (no surface, no makeCurrent, no GL work) before Phase 2.
 // ---------------------------------------------------------------------------
 
 static ReproStatus v10_bare_egl(void) {
@@ -115,17 +113,10 @@ static ReproStatus v10_bare_egl(void) {
     const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
     if (context == EGL_NO_CONTEXT) { set_err(&s, "v10 bare eglCreateContext"); eglTerminate(display); return s; }
-    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-    EGLSurface surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
-    if (surface == EGL_NO_SURFACE) {
-        set_err(&s, "v10 bare eglCreatePbufferSurface");
-        eglDestroyContext(display, context); eglTerminate(display); return s;
-    }
 
-    LOGI("variant10 bare: created+destroying ctx %p surface %p on display %p (no makeCurrent)",
-         (void*)context, (void*)surface, (void*)display);
+    LOGI("variant10 bare: created+destroying ctx %p on display %p (no surface, no makeCurrent)",
+         (void*)context, (void*)display);
 
-    eglDestroySurface(display, surface);
     eglDestroyContext(display, context);
     eglTerminate(display);
     s.success = 1;
