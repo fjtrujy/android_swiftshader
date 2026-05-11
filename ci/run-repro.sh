@@ -16,6 +16,10 @@ adb shell getprop ro.kernel.qemu.gltransport.name || true
 adb shell getprop ro.hardware.gltransport || true
 
 echo "=== install + launch ==="
+# AVD cache may contain a previously-installed copy of the app signed with a
+# different debug keystore — uninstall first so `install -r` doesn't fail with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE.
+adb uninstall "$PKG" || true
 adb install -r "$APK_PATH"
 adb logcat -c
 adb shell am start -W -n "$PKG/.MainActivity"
