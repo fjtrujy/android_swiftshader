@@ -146,4 +146,19 @@ ReproStatus repro_variant15_instanced_attribute_divisor(uint8_t* pixels, int wid
 // Expected: every pixel red (same as variant 13).
 ReproStatus repro_variant16_state_pollution(uint8_t* pixels, int width, int height);
 
+// Variant 17: drawArraysInstanced sampling from a `sampler2D[N]` array indexed by
+// a per-instance vertex attribute. The renderer's `drawTexturedRectangles` shader
+// (program 34 in the trace) accepts heterogeneous `uniqueTextures` array and indexes
+// into it via per-instance data. Dynamic indexing of sampler arrays is a historic
+// weak spot in GL implementations.
+//   - 512x512 RGBA8 target FBO, cleared to (0, 0, 0, 0).
+//   - 2 source textures (TEXTURE0, TEXTURE1) each pre-filled with opaque red.
+//   - Shader: `uniform sampler2D u_textures[2]; in int v_tex_index; ...
+//             color = texture(u_textures[v_tex_index], v_uv);`
+//   - Per-instance attribute supplies tex_index (0 or 1) per instance.
+//   - 16 instances tile NDC [-1, 1] in a 4x4 grid.
+//   - Normal alpha blend, glDrawArraysInstanced(..., 16).
+// Expected: every pixel red.
+ReproStatus repro_variant17_sampler_array_dynamic_index(uint8_t* pixels, int width, int height);
+
 #endif

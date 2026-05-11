@@ -178,6 +178,12 @@ Java_com_example_swsrepro_ReproNative_runVariant16(JNIEnv* env, jclass clazz, jb
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant17(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    return run_v512_variant(env, out_pixels, "variant17", repro_variant17_sampler_array_dynamic_index);
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_example_swsrepro_ReproNative_runVariant7(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
     (void)clazz;
     const int W = SWSREPRO_V7_WIDTH, H = SWSREPRO_V7_HEIGHT;

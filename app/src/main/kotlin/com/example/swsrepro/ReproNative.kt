@@ -83,6 +83,13 @@ object ReproNative {
      */
     @JvmStatic external fun runVariant16(outPixels: ByteArray): String
 
+    /**
+     * Variant 17: drawArraysInstanced sampling from `sampler2D[2]` indexed by per-instance
+     * int attribute. Mirrors the renderer's drawTexturedRectangles shader. `outPixels`
+     * must be 512*512*4 bytes.
+     */
+    @JvmStatic external fun runVariant17(outPixels: ByteArray): String
+
     data class Summary(
         val success: Boolean,
         val error: String,
