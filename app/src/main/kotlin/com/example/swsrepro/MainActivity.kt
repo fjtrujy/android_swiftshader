@@ -28,6 +28,19 @@ class MainActivity : Activity() {
         val preambleSummary = ReproNative.parse(ReproNative.runPreamble())
         Log.i(tag, "preamble: success=${preambleSummary.success} err='${preambleSummary.error}'")
 
+        // Match the proven-working bisect flow: allocate an empty ARGB_8888 Bitmap
+        // and compress it to PNG between phases. Without this Skia-driven step the
+        // bug doesn't trigger — it's part of the priming.
+        val primer = Bitmap.createBitmap(
+            ReproNative.WIDTH, ReproNative.HEIGHT, Bitmap.Config.ARGB_8888
+        )
+        File(outDir, "primer.png").let { primerFile ->
+            FileOutputStream(primerFile).use { os ->
+                primer.compress(Bitmap.CompressFormat.PNG, 100, os)
+            }
+            Log.i(tag, "primer written: ${primerFile.length()} bytes")
+        }
+
         // Phase 2 — the actual test.
         val pixels = ByteArray(ReproNative.WIDTH * ReproNative.HEIGHT * 4)
         val summary = ReproNative.parse(ReproNative.runTest(pixels))
