@@ -1,18 +1,19 @@
 // The SwiftShader Android-emulator render bug — minimal repro.
 //
 // One JNI entry point invoked from Kotlin (`repro_run_test`) does the entire
-// trigger sequence in a fresh process:
-//   - Main thread:   create GLES3 context A on EGL_DEFAULT_DISPLAY.
-//   - Worker pthread: create context B with `share_context = A`. Allocate a
-//                     256x256 RGBA8 texture in the share group. Upload opaque
-//                     red via PBO map / memcpy / unmap + glTexSubImage2D from
-//                     PBO offset 0. glFenceSync + glFlush. Release.
-//   - Main thread:   glWaitSync the fence. Bind the worker's texture into a
-//                     512x512 RGBA8 FBO, draw a full-NDC quad, glReadPixels.
+// trigger sequence in a fresh process. Bisect step: SINGLE-THREAD variant —
+// drop the worker pthread + shared context. All GL is on the main context:
+//   - Bring up GLES3 + 1x1 pbuffer.
+//   - Allocate a 256x256 RGBA8 source texture; PBO-upload opaque red via
+//     glMapBufferRange + glUnmapBuffer + glTexSubImage2D from PBO offset 0.
+//   - Bind a 512x512 RGBA8 destination FBO; draw a full-NDC quad sampling
+//     the source texture; glReadPixels.
 //
 // Expected output: every pixel `(255, 0, 0, 255)`.
-// On the Android emulator with `-gpu swiftshader`: every pixel `(0, 0, 0, 0)`.
-// On `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan): correct red.
+// On the Android emulator with `-gpu swiftshader`: previously shown to give
+// `(0, 0, 0, 0)` when the upload ran on a SHARED context on a worker thread.
+// This run tests whether the same broken pixels appear when the same upload
+// pattern runs on a single main thread context.
 
 #include "repro.h"
 
@@ -20,7 +21,6 @@
 #include <GLES2/gl2.h>
 #include <GLES3/gl3.h>
 
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,95 +98,8 @@ static const char* FS_TEXTURED_QUAD_SRC =
     "void main() { gl_FragColor = texture2D(u_tex, v_uv); }\n";
 
 // ---------------------------------------------------------------------------
-// Worker thread: creates a shared GLES3 context, uploads a 256x256 RGBA8 red
-// texture via PBO + glTexSubImage2D, fences, flushes, releases.
-// ---------------------------------------------------------------------------
-
-struct WorkerArgs {
-    EGLDisplay display;
-    EGLConfig  config;
-    EGLContext main_context;
-    GLuint     texture;     // created here, sampled by main.
-    GLsync     fence;       // signalled here, waited by main.
-    int        worker_ok;
-    char       worker_err[128];
-};
-
-static void* upload_worker(void* arg) {
-    struct WorkerArgs* shared = (struct WorkerArgs*)arg;
-    shared->worker_ok = 0;
-    shared->worker_err[0] = '\0';
-
-    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
-    EGLContext worker_context = eglCreateContext(shared->display, shared->config,
-                                                  shared->main_context, ctx_attribs);
-    if (worker_context == EGL_NO_CONTEXT) {
-        snprintf(shared->worker_err, sizeof(shared->worker_err),
-                 "worker eglCreateContext (shared) failed, eglError=0x%04X", eglGetError());
-        return NULL;
-    }
-    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-    EGLSurface worker_surface = eglCreatePbufferSurface(shared->display, shared->config, pbuf_attribs);
-    if (worker_surface == EGL_NO_SURFACE) {
-        snprintf(shared->worker_err, sizeof(shared->worker_err), "worker pbuffer failed");
-        eglDestroyContext(shared->display, worker_context); return NULL;
-    }
-    if (!eglMakeCurrent(shared->display, worker_surface, worker_surface, worker_context)) {
-        snprintf(shared->worker_err, sizeof(shared->worker_err), "worker makeCurrent failed");
-        eglDestroySurface(shared->display, worker_surface);
-        eglDestroyContext(shared->display, worker_context); return NULL;
-    }
-
-    // Allocate the shared texture in the share group.
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
-
-    // PBO-backed upload: map/memcpy red/unmap, then glTexSubImage2D from PBO offset 0.
-    GLuint pbo = 0;
-    glGenBuffers(1, &pbo);
-    glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
-    size_t byteSize = (size_t)SOURCE_SIZE * (size_t)SOURCE_SIZE * 4;
-    glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
-    void* mapped = glMapBufferRange(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
-                                     V_GL_MAP_WRITE_BIT | V_GL_MAP_INVALIDATE_BUFFER_BIT);
-    if (!mapped) {
-        snprintf(shared->worker_err, sizeof(shared->worker_err), "worker glMapBufferRange returned NULL");
-        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
-        glDeleteBuffers(1, &pbo); glDeleteTextures(1, &tex);
-        eglMakeCurrent(shared->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroySurface(shared->display, worker_surface);
-        eglDestroyContext(shared->display, worker_context);
-        return NULL;
-    }
-    uint8_t* m = (uint8_t*)mapped;
-    for (size_t i = 0; i < byteSize; i += 4) {
-        m[i+0] = 255; m[i+1] = 0; m[i+2] = 0; m[i+3] = 255;
-    }
-    glUnmapBuffer(V_GL_PIXEL_UNPACK_BUFFER);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
-                    GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)0);
-    glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
-    glDeleteBuffers(1, &pbo);
-
-    // Fence and flush, hand off to main.
-    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    glFlush();
-    shared->texture = tex;
-    shared->fence   = fence;
-    shared->worker_ok = 1;
-
-    // Release the worker's hold on its context — only one thread can hold an
-    // EGL context current at once.
-    eglMakeCurrent(shared->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    eglDestroySurface(shared->display, worker_surface);
-    eglDestroyContext(shared->display, worker_context);
-    return NULL;
-}
-
-// ---------------------------------------------------------------------------
-// Main path: bootstrap GLES3 + spawn worker + wait on fence + sample texture.
+// Main path: bootstrap GLES3 + PBO upload + sample texture, all on the main
+// thread (no worker, no shared context). Bisect step.
 // ---------------------------------------------------------------------------
 
 static ReproStatus run_test(uint8_t* pixels) {
@@ -194,9 +107,7 @@ static ReproStatus run_test(uint8_t* pixels) {
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLContext main_context = EGL_NO_CONTEXT;
     EGLSurface main_surface = EGL_NO_SURFACE;
-    GLuint dst_tex = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
-    pthread_t worker_thread = 0;
-    struct WorkerArgs shared = {0};
+    GLuint src_tex = 0, dst_tex = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
 
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (display == EGL_NO_DISPLAY) { set_err(&s, "main eglGetDisplay"); goto cleanup; }
@@ -228,23 +139,35 @@ static ReproStatus run_test(uint8_t* pixels) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    shared.display      = display;
-    shared.config       = config;
-    shared.main_context = main_context;
-    if (pthread_create(&worker_thread, NULL, upload_worker, &shared) != 0) {
-        set_err(&s, "pthread_create failed"); goto cleanup;
-    }
-    pthread_join(worker_thread, NULL);
-    if (!shared.worker_ok) {
-        char buf[200];
-        snprintf(buf, sizeof(buf), "worker failed: %s", shared.worker_err);
-        set_err(&s, buf); goto cleanup;
-    }
+    // Source texture: 256x256 RGBA8 uploaded via PBO + glTexSubImage2D
+    // (same upload pattern as before, just on the main context).
+    glGenTextures(1, &src_tex);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
 
-    // Wait on the worker's fence (GPU-side), then sample the shared texture.
-    glWaitSync(shared.fence, 0, GL_TIMEOUT_IGNORED);
-    glDeleteSync(shared.fence);
-    shared.fence = NULL;
+    {
+        GLuint pbo = 0;
+        glGenBuffers(1, &pbo);
+        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
+        size_t byteSize = (size_t)SOURCE_SIZE * (size_t)SOURCE_SIZE * 4;
+        glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
+        void* mapped = glMapBufferRange(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
+                                         V_GL_MAP_WRITE_BIT | V_GL_MAP_INVALIDATE_BUFFER_BIT);
+        if (!mapped) {
+            glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
+            glDeleteBuffers(1, &pbo);
+            set_err(&s, "main glMapBufferRange returned NULL"); goto cleanup;
+        }
+        uint8_t* m = (uint8_t*)mapped;
+        for (size_t i = 0; i < byteSize; i += 4) {
+            m[i+0] = 255; m[i+1] = 0; m[i+2] = 0; m[i+3] = 255;
+        }
+        glUnmapBuffer(V_GL_PIXEL_UNPACK_BUFFER);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
+                        GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)0);
+        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
+        glDeleteBuffers(1, &pbo);
+    }
 
     glGenTextures(1, &dst_tex);
     glBindTexture(GL_TEXTURE_2D, dst_tex);
@@ -286,7 +209,7 @@ static ReproStatus run_test(uint8_t* pixels) {
                           (const void*)(2 * sizeof(GLfloat)));
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, shared.texture);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
     GLint u_tex = glGetUniformLocation(program, "u_tex");
     glUniform1i(u_tex, 0);
 
@@ -303,7 +226,7 @@ static ReproStatus run_test(uint8_t* pixels) {
     s.success = 1;
 
 cleanup:
-    if (shared.texture) glDeleteTextures(1, &shared.texture);
+    if (src_tex) glDeleteTextures(1, &src_tex);
     if (vbo) glDeleteBuffers(1, &vbo);
     if (program) glDeleteProgram(program);
     if (vs) glDeleteShader(vs);
@@ -321,6 +244,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: shared-context worker uploads via PBO+fence; main glWaitSync + samples");
+    LOGI("repro_run_test: single-thread PBO upload + sample (no worker, no shared context)");
     return run_test(pixels);
 }
