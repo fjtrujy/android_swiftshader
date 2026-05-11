@@ -24,45 +24,11 @@ class MainActivity : Activity() {
         outDir.listFiles()?.forEach { it.delete() }
         Log.i(tag, "output dir = ${outDir.absolutePath}")
 
-        runByteArrayVariant("variant2", outDir, ReproNative::runVariant2)
-        runBitmapVariant("variant3", outDir)
-        runByteArrayVariant("variant4", outDir, ReproNative::runVariant4)
-        runByteArrayVariant("variant5", outDir, ReproNative::runVariant5)
-        runByteArrayVariant("variant6", outDir, ReproNative::runVariant6)
-        runByteArrayVariant(
-            "variant7", outDir, ReproNative::runVariant7,
-            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
-        )
-        runByteArrayVariant("variant8", outDir, ReproNative::runVariant8)
-        runByteArrayVariant("variant9", outDir, ReproNative::runVariant9)
+        // BISECTION: keep only variant 10 (fresh-context off-thread pthread) + variant 19
+        // (shared-context cross-thread upload + sample). If the bug repros with just
+        // these two, variant 10's pattern alone is the minimum preamble required.
         runByteArrayVariant(
             "variant10", outDir, ReproNative::runVariant10,
-            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
-        )
-        runByteArrayVariant(
-            "variant11", outDir, ReproNative::runVariant11,
-            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
-        )
-        runByteArrayVariant(
-            "variant12", outDir, ReproNative::runVariant12,
-            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
-        )
-        runByteArrayVariant(
-            "variant13", outDir, ReproNative::runVariant13,
-            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
-        )
-        runByteArrayVariant("variant14", outDir, ReproNative::runVariant14)
-        runByteArrayVariant(
-            "variant15", outDir, ReproNative::runVariant15,
-            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
-        )
-        runByteArrayVariant("variant16", outDir, ReproNative::runVariant16)
-        runByteArrayVariant(
-            "variant17", outDir, ReproNative::runVariant17,
-            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
-        )
-        runByteArrayVariant(
-            "variant18", outDir, ReproNative::runVariant18,
             width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
         )
         runByteArrayVariant(
