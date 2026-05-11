@@ -86,12 +86,10 @@ static const char* FS_TEXTURED_QUAD_SRC =
     "void main() { gl_FragColor = texture2D(u_tex, v_uv); }\n";
 
 // ---------------------------------------------------------------------------
-// Phase 1: variant10 — preamble.
-// Bisect step: drop eglTerminate. Just eglGetDisplay + eglInitialize on
-// EGL_DEFAULT_DISPLAY. If the bug stops here, eglTerminate is the actual
-// trigger (and the minimal pattern is Init/Terminate-then-Init-again).
-// If the bug still reproduces, calling eglInitialize twice (preamble +
-// Phase 2's refcounted call) is itself enough.
+// Phase 1: variant10 — preamble (negative control).
+// Drop eglInitialize. Just eglGetDisplay (a pure lookup, no allocation).
+// Expected: bug DOES NOT reproduce — confirms eglInitialize itself is the
+// trigger when called twice in the same process on EGL_DEFAULT_DISPLAY.
 // ---------------------------------------------------------------------------
 
 static ReproStatus v10_bare_egl(void) {
@@ -99,9 +97,8 @@ static ReproStatus v10_bare_egl(void) {
 
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (display == EGL_NO_DISPLAY) { set_err(&s, "v10 bare eglGetDisplay"); return s; }
-    if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "v10 bare eglInitialize"); return s; }
 
-    LOGI("variant10 bare: eglInitialize only on display %p (no eglTerminate)",
+    LOGI("variant10 bare: eglGetDisplay only %p (no eglInitialize)",
          (void*)display);
 
     s.success = 1;
