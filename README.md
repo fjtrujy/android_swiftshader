@@ -241,15 +241,17 @@ premultiplied-alpha quirks can't mask anything.
 
 ## Files of interest for review
 
-- **`app/src/main/cpp/repro.c`**:
-  - `repro_variant10_offthread_gl` — Phase 1 (preamble), around line 698.
-  - `repro_variant19_shared_context_upload_and_sample` (calls `v19_main_path` and
-    `v19_worker`) — Phase 2 (the test), around line 1961.
-  - The helpers `run_with_gl`, `compile_shader`, `set_err`, `check_gl`, and
-    the shaders `VS_OFFSET_QUAD_SRC` / `FS_UNIFORM_COLOR_SRC` /
-    `VS_TEXTURED_QUAD_SRC` / `FS_TEXTURED_QUAD_SRC` they share.
-- **`app/src/main/cpp/jni_glue.c`**: only `runVariant10` and `runVariant19`
-  are invoked from Kotlin; the rest are present for the library-size dependency.
-- **`app/src/main/kotlin/com/example/swsrepro/MainActivity.kt`**: the two-call
-  sequence (Phase 1, Phase 2, and PNG save).
-- **`.github/workflows/repro.yml`**: matrix CI (`swiftshader` vs `swangle`).
+| File | Lines | Purpose |
+|---|---|---|
+| **`app/src/main/cpp/repro.c`** | ~430 | Read this. Defines the two test entry points and the helpers/shaders they share. |
+| **`app/src/main/cpp/repro_internal.h`** | ~45 | Shared declarations between `repro.c` and `padding.c`. |
+| `app/src/main/cpp/padding.c` | ~1490 | Historical variants 2-9, 11-18 from the bisection. Never invoked but **do not strip** — see "Library-size dependency" above. |
+| `app/src/main/cpp/jni_glue.c` | ~250 | JNI bindings; only `runVariant10` and `runVariant19` are called from Kotlin. |
+| `app/src/main/kotlin/com/example/swsrepro/MainActivity.kt` | ~50 | The two-call sequence (Phase 1, Phase 2, PNG save). |
+| `.github/workflows/repro.yml` | ~110 | Matrix CI (`swiftshader` vs `swangle`). |
+
+In `repro.c` the entry points are:
+
+- `repro_variant10_offthread_gl` — **Phase 1 (preamble)**.
+- `repro_variant19_shared_context_upload_and_sample` (calls `v19_main_path` +
+  `v19_worker`) — **Phase 2 (the test)**.
