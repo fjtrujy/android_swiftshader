@@ -196,41 +196,90 @@ static void* worker_main(void* arg) {
 // EGL session is enough to prime whatever process-wide state SwiftShader-direct
 // then handles incorrectly during cross-context resource sharing.
 
+// GLES2-style shaders (matches variant 10's offset_quad_copy_blend exactly).
+static const char* PREAMBLE_VS =
+    "attribute vec2 a_pos;\n"
+    "void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
+
+static const char* PREAMBLE_FS =
+    "precision mediump float;\n"
+    "uniform vec4 u_color;\n"
+    "void main() { gl_FragColor = u_color; }\n";
+
 static void* preamble_body(void* arg) {
     (void)arg;
     EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (d == EGL_NO_DISPLAY) return NULL;
     eglInitialize(d, NULL, NULL);
 
+    // Note: GLES2 (not GLES3) — variant 10 uses GLES2. Matters if SwiftShader's
+    // bug is in cross-major-version state transitions.
     const EGLint cfg_attribs[] = {
         EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
         EGL_NONE
     };
     EGLConfig cfg; EGLint n = 0;
     if (!eglChooseConfig(d, cfg_attribs, &cfg, 1, &n) || n < 1) { eglTerminate(d); return NULL; }
 
-    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     EGLContext c = eglCreateContext(d, cfg, EGL_NO_CONTEXT, ctx_attribs);
     const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
     EGLSurface s = eglCreatePbufferSurface(d, cfg, pbuf_attribs);
     eglMakeCurrent(d, s, s, c);
 
-    // One trivial draw + readback into a 64x64 RGBA8 FBO.
-    GLuint tex = 0, fbo = 0;
+    // Allocate a 256x256 RGBA8 texture-FBO, compile shaders, draw a red quad
+    // with `.copy` blend (GL_ONE, GL_ZERO), read back. Mirrors variant 10's
+    // `offset_quad_copy_blend` exactly.
+    GLuint tex = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
     glGenTextures(1, &tex);
     glBindTexture(GL_TEXTURE_2D, tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 64, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 256, 256, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
-    glViewport(0, 0, 64, 64);
-    glClearColor(0.5f, 0.5f, 0.5f, 1.0f);
+
+    vs = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vs, 1, &PREAMBLE_VS, NULL);
+    glCompileShader(vs);
+    fs = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fs, 1, &PREAMBLE_FS, NULL);
+    glCompileShader(fs);
+    program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "a_pos");
+    glLinkProgram(program);
+    glUseProgram(program);
+
+    static const GLfloat quad[] = { -1.f, -1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f };
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+
+    glViewport(0, 0, 256, 256);
+    glDisable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ZERO); // `.copy` blend (no blending; src replaces dst)
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    uint8_t tmp[64 * 64 * 4];
-    glReadPixels(0, 0, 64, 64, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+    GLint u_color = glGetUniformLocation(program, "u_color");
+    glUniform4f(u_color, 1.0f, 0.0f, 0.0f, 1.0f);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glFinish();
+    uint8_t tmp[256 * 256 * 4];
+    glReadPixels(0, 0, 256, 256, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDeleteBuffers(1, &vbo);
+    glDeleteProgram(program);
+    glDeleteShader(vs);
+    glDeleteShader(fs);
     glDeleteFramebuffers(1, &fbo);
     glDeleteTextures(1, &tex);
 
