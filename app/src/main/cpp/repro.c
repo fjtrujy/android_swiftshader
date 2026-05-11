@@ -87,10 +87,11 @@ static const char* FS_TEXTURED_QUAD_SRC =
 
 // ---------------------------------------------------------------------------
 // Phase 1: variant10 — preamble.
-// Bisect step: bare EGL init + makeCurrent + teardown on the MAIN thread
-// (no pthread). Confirmed earlier that the bug reproduces with the same
-// sequence on a worker thread; this run tests whether the off-thread
-// aspect matters at all.
+// Bisect step: drop eglMakeCurrent + glGetString from the bare-EGL sequence.
+// Create + destroy a transient context and pbuffer surface without ever
+// binding them. If the bug still reproduces, the trigger doesn't even
+// require the secondary context to be made current — just its existence
+// in the EGL state before Phase 2 starts.
 // ---------------------------------------------------------------------------
 
 static ReproStatus v10_bare_egl(void) {
@@ -120,17 +121,10 @@ static ReproStatus v10_bare_egl(void) {
         set_err(&s, "v10 bare eglCreatePbufferSurface");
         eglDestroyContext(display, context); eglTerminate(display); return s;
     }
-    if (!eglMakeCurrent(display, surface, surface, context)) {
-        set_err(&s, "v10 bare eglMakeCurrent");
-        eglDestroySurface(display, surface); eglDestroyContext(display, context); eglTerminate(display); return s;
-    }
 
-    LOGI("variant10 bare: GL_VENDOR='%s' GL_RENDERER='%s' GL_VERSION='%s'",
-         (const char*)glGetString(GL_VENDOR),
-         (const char*)glGetString(GL_RENDERER),
-         (const char*)glGetString(GL_VERSION));
+    LOGI("variant10 bare: created+destroying ctx %p surface %p on display %p (no makeCurrent)",
+         (void*)context, (void*)surface, (void*)display);
 
-    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface(display, surface);
     eglDestroyContext(display, context);
     eglTerminate(display);
