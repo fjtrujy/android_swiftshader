@@ -56,4 +56,23 @@ ReproStatus repro_variant6_srgb_framebuffer(uint8_t* pixels, int width, int heig
 //   - corner pixel (0, 0)   outside the quad: (0, 0, 0, 0)
 ReproStatus repro_variant7_offset_quad_copy_blend(uint8_t* pixels, int width, int height);
 
+// Variant 8: texture-sampling. Create a 256x256 source texture initialized to red
+// via `glTexImage2D` with non-NULL data. Bind a second texture as the target FBO.
+// Draw a fullscreen quad whose fragment shader samples from the source texture.
+// Mirrors the Renderer's `drawTexturedRectangles` call.
+// Expected: every pixel == (255, 0, 0, 255).
+ReproStatus repro_variant8_texture_sampling(uint8_t* pixels, int width, int height);
+
+// Variant 9: CPU → GL upload via `glTexSubImage2D`. Allocate a CPU buffer, fill it with
+// solid red, allocate an empty GL texture, upload via glTexSubImage2D, bind as FBO,
+// `glReadPixels` back. Mirrors the Renderer's `.syncCPU` rasterizer upload path.
+// Expected: every pixel == (255, 0, 0, 255).
+ReproStatus repro_variant9_texsubimage_upload(uint8_t* pixels, int width, int height);
+
+// Variant 10: off-thread GL. Spawn a worker pthread that does the EGL init + variant 7
+// (offset red quad with .copy blend on transparent black) + cleanup. Main thread waits
+// via `pthread_join`. Mirrors the Renderer running off the activity's main thread.
+// Expected: same as variant 7.
+ReproStatus repro_variant10_offthread_gl(uint8_t* pixels, int width, int height);
+
 #endif

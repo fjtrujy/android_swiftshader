@@ -40,6 +40,15 @@ object ReproNative {
      */
     @JvmStatic external fun runVariant7(outPixels: ByteArray): String
 
+    /** Variant 8: source texture pre-filled with red, sampled to target FBO. */
+    @JvmStatic external fun runVariant8(outPixels: ByteArray): String
+
+    /** Variant 9: CPU buffer -> glTexSubImage2D -> FBO -> glReadPixels. */
+    @JvmStatic external fun runVariant9(outPixels: ByteArray): String
+
+    /** Variant 10: variant 7 driven on a worker pthread, off the main thread. */
+    @JvmStatic external fun runVariant10(outPixels: ByteArray): String
+
     data class Summary(
         val success: Boolean,
         val error: String,

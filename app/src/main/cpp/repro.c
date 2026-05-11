@@ -3,8 +3,10 @@
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
 #include <GLES3/gl3.h>
+#include <pthread.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <android/log.h>
 
@@ -482,4 +484,224 @@ cleanup:
 ReproStatus repro_variant7_offset_quad_copy_blend(uint8_t* pixels, int width, int height) {
     LOGI("variant7: offset red quad with .copy blend on transparent-black bg (%dx%d)", width, height);
     return run_with_gl(2, pixels, width, height, offset_quad_copy_blend);
+}
+
+// ---------------------------------------------------------------------------
+// Variant 8: texture sampling. Source texture pre-filled with red is sampled
+// in the fragment shader to fill a target FBO.
+// ---------------------------------------------------------------------------
+
+static const char* VS_TEXTURED_QUAD_SRC =
+    "attribute vec2 a_pos;\n"
+    "attribute vec2 a_uv;\n"
+    "varying vec2 v_uv;\n"
+    "void main() {\n"
+    "  v_uv = a_uv;\n"
+    "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
+    "}\n";
+
+static const char* FS_TEXTURED_QUAD_SRC =
+    "precision mediump float;\n"
+    "varying vec2 v_uv;\n"
+    "uniform sampler2D u_tex;\n"
+    "void main() { gl_FragColor = texture2D(u_tex, v_uv); }\n";
+
+static ReproStatus texture_sampling(uint8_t* pixels, int width, int height) {
+    ReproStatus s = {0};
+
+    GLuint src_texture = 0, dst_texture = 0, fbo = 0;
+    GLuint vs = 0, fs = 0, program = 0, vbo = 0;
+
+    // Source texture: CPU-fill 256x256 RGBA with opaque red.
+    size_t src_bytes = (size_t)width * (size_t)height * 4;
+    uint8_t* src_pixels = malloc(src_bytes);
+    if (!src_pixels) { set_err(&s, "variant8 malloc failed"); goto cleanup; }
+    for (size_t i = 0; i < src_bytes; i += 4) {
+        src_pixels[i + 0] = 255; src_pixels[i + 1] = 0;
+        src_pixels[i + 2] = 0;   src_pixels[i + 3] = 255;
+    }
+
+    glGenTextures(1, &src_texture);
+    glBindTexture(GL_TEXTURE_2D, src_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, src_pixels);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (!check_gl(&s, "variant8 source glTexImage2D")) goto cleanup;
+
+    // Destination texture + FBO.
+    glGenTextures(1, &dst_texture);
+    glBindTexture(GL_TEXTURE_2D, dst_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, dst_texture, 0);
+    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+        char buf[128]; snprintf(buf, sizeof(buf), "variant8 FBO incomplete, status=0x%04X", st);
+        set_err(&s, buf); goto cleanup;
+    }
+
+    // Program.
+    vs = compile_shader(GL_VERTEX_SHADER, VS_TEXTURED_QUAD_SRC, &s); if (!vs) goto cleanup;
+    fs = compile_shader(GL_FRAGMENT_SHADER, FS_TEXTURED_QUAD_SRC, &s); if (!fs) goto cleanup;
+    program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "a_pos");
+    glBindAttribLocation(program, 1, "a_uv");
+    glLinkProgram(program);
+    GLint linked = 0; glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[256] = {0}; glGetProgramInfoLog(program, sizeof(log) - 1, NULL, log);
+        char buf[256]; snprintf(buf, sizeof(buf), "variant8 link failed: %s", log);
+        set_err(&s, buf); goto cleanup;
+    }
+    glUseProgram(program);
+
+    // Fullscreen quad with UVs covering the full source texture.
+    static const GLfloat quad[] = {
+        // pos      // uv
+        -1.0f, -1.0f, 0.0f, 0.0f,
+         1.0f, -1.0f, 1.0f, 0.0f,
+        -1.0f,  1.0f, 0.0f, 1.0f,
+         1.0f,  1.0f, 1.0f, 1.0f,
+    };
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), NULL);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+                          (const void*)(2 * sizeof(GLfloat)));
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, src_texture);
+    GLint u_tex = glGetUniformLocation(program, "u_tex");
+    glUniform1i(u_tex, 0);
+
+    glViewport(0, 0, width, height);
+    glDisable(GL_BLEND);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glFinish();
+
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(&s, "variant8 readback")) goto cleanup;
+
+    s.success = 1;
+
+cleanup:
+    free(src_pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (vbo) glDeleteBuffers(1, &vbo);
+    if (program) glDeleteProgram(program);
+    if (vs) glDeleteShader(vs);
+    if (fs) glDeleteShader(fs);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (src_texture) glDeleteTextures(1, &src_texture);
+    if (dst_texture) glDeleteTextures(1, &dst_texture);
+    return s;
+}
+
+ReproStatus repro_variant8_texture_sampling(uint8_t* pixels, int width, int height) {
+    LOGI("variant8: CPU-filled red source texture sampled to target FBO (%dx%d)", width, height);
+    return run_with_gl(2, pixels, width, height, texture_sampling);
+}
+
+// ---------------------------------------------------------------------------
+// Variant 9: glTexSubImage2D upload from a CPU buffer, then readback.
+// ---------------------------------------------------------------------------
+
+static ReproStatus texsubimage_upload(uint8_t* pixels, int width, int height) {
+    ReproStatus s = {0};
+    GLuint texture = 0, fbo = 0;
+
+    // CPU buffer pre-filled with opaque red.
+    size_t bytes = (size_t)width * (size_t)height * 4;
+    uint8_t* cpu_pixels = malloc(bytes);
+    if (!cpu_pixels) { set_err(&s, "variant9 malloc failed"); goto cleanup; }
+    for (size_t i = 0; i < bytes; i += 4) {
+        cpu_pixels[i + 0] = 255; cpu_pixels[i + 1] = 0;
+        cpu_pixels[i + 2] = 0;   cpu_pixels[i + 3] = 255;
+    }
+
+    // Empty texture allocated via glTexImage2D (no initial data) and then
+    // filled via glTexSubImage2D — the renderer's CPU-buffer upload path.
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height,
+                    GL_RGBA, GL_UNSIGNED_BYTE, cpu_pixels);
+    if (!check_gl(&s, "variant9 glTexSubImage2D")) goto cleanup;
+
+    // Bind as FBO, glReadPixels.
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, texture, 0);
+    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+        char buf[128]; snprintf(buf, sizeof(buf), "variant9 FBO incomplete, status=0x%04X", st);
+        set_err(&s, buf); goto cleanup;
+    }
+
+    glFinish();
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(&s, "variant9 readback")) goto cleanup;
+
+    s.success = 1;
+
+cleanup:
+    free(cpu_pixels);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (texture) glDeleteTextures(1, &texture);
+    return s;
+}
+
+ReproStatus repro_variant9_texsubimage_upload(uint8_t* pixels, int width, int height) {
+    LOGI("variant9: CPU buffer -> glTexSubImage2D -> FBO -> glReadPixels (%dx%d)", width, height);
+    return run_with_gl(2, pixels, width, height, texsubimage_upload);
+}
+
+// ---------------------------------------------------------------------------
+// Variant 10: off-thread GL — run variant 7 (offset red quad) on a worker pthread.
+// ---------------------------------------------------------------------------
+
+struct ThreadArgs {
+    uint8_t* pixels;
+    int width;
+    int height;
+    ReproStatus result;
+};
+
+static void* offthread_worker(void* arg) {
+    struct ThreadArgs* t = (struct ThreadArgs*)arg;
+    t->result = run_with_gl(2, t->pixels, t->width, t->height, offset_quad_copy_blend);
+    return NULL;
+}
+
+ReproStatus repro_variant10_offthread_gl(uint8_t* pixels, int width, int height) {
+    LOGI("variant10: variant7 on a worker pthread (%dx%d)", width, height);
+    struct ThreadArgs args = { .pixels = pixels, .width = width, .height = height };
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, offthread_worker, &args) != 0) {
+        ReproStatus s; set_err(&s, "pthread_create failed"); return s;
+    }
+    pthread_join(thread, NULL);
+    return args.result;
 }
