@@ -236,18 +236,11 @@ static void* churn_body(void* arg) {
 }
 
 static void egl_context_churn(int iterations) {
-    // Run the churn from a worker thread, matching the renderer's BackgroundGLUploader
-    // pattern (and our variant 10's fresh-context pthread). The main thread will pick
-    // up after this and run the actual cross-context test.
-    struct ChurnArgs a = { iterations, 1 };
-    pthread_t t = 0;
-    if (pthread_create(&t, NULL, churn_body, &a) != 0) {
-        // Fall back to running synchronously on the main thread.
-        a.from_worker_thread = 0;
-        churn_body(&a);
-        return;
-    }
-    pthread_join(t, NULL);
+    // Run the churn synchronously on the calling thread (same thread that will
+    // then run the cross-context test). Matches how variants 2-18 ran sequentially
+    // on the Activity's main thread before variant 19 on the `main` branch.
+    struct ChurnArgs a = { iterations, 0 };
+    churn_body(&a);
 }
 
 // --- Main thread -------------------------------------------------------------
