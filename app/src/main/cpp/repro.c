@@ -28,6 +28,10 @@
 #define LOG_TAG "swsrepro"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 
+// PBO constants — not exposed by the NDK GLES headers we link against.
+#define V_GL_PIXEL_UNPACK_BUFFER       0x88EC
+#define V_GL_STREAM_DRAW               0x88E0
+
 #define SOURCE_SIZE  256
 #define TARGET_W     512
 #define TARGET_H     512
@@ -133,7 +137,10 @@ static ReproStatus run_test(uint8_t* pixels) {
          (const char*)glGetString(GL_VERSION));
 
     // Source texture: 256x256 RGBA8. glTexStorage2D (immutable storage) +
-    // glTexSubImage2D from a CPU pointer (NO PBO). Bisect step.
+    // PBO upload using glBufferSubData (NOT glMapBufferRange/glUnmapBuffer)
+    // + glTexSubImage2D from PBO offset 0. Bisect step: if bug stays away,
+    // the map/unmap path was the broken piece. If bug reappears, the
+    // upload-from-PBO step itself is broken.
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
     glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
@@ -144,8 +151,15 @@ static ReproStatus run_test(uint8_t* pixels) {
         for (size_t i = 0; i < byteSize; i += 4) {
             cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
         }
+        GLuint pbo = 0;
+        glGenBuffers(1, &pbo);
+        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
+        glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
+        glBufferSubData(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize, cpu);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
-                        GL_RGBA, GL_UNSIGNED_BYTE, cpu);
+                        GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)0);
+        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
+        glDeleteBuffers(1, &pbo);
         free(cpu);
     }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
@@ -226,6 +240,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: single-thread glTexStorage2D + glTexSubImage2D from CPU pointer (no PBO)");
+    LOGI("repro_run_test: single-thread PBO via glBufferSubData (no map/unmap) + glTexSubImage2D");
     return run_test(pixels);
 }
