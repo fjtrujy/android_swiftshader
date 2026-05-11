@@ -179,10 +179,54 @@ static void* worker_main(void* arg) {
     return NULL;
 }
 
+// --- Preamble: create+destroy N EGL contexts -----------------------------
+//
+// The bug only manifested after the process had created+destroyed many EGL
+// contexts in earlier test variants. This preamble approximates that pattern.
+
+static void egl_context_churn(int iterations) {
+    EGLDisplay d = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (d == EGL_NO_DISPLAY) return;
+    eglInitialize(d, NULL, NULL);
+    const EGLint cfg_attribs[] = {
+        EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_NONE
+    };
+    EGLConfig cfg; EGLint n = 0;
+    if (!eglChooseConfig(d, cfg_attribs, &cfg, 1, &n) || n < 1) { eglTerminate(d); return; }
+    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    for (int i = 0; i < iterations; i++) {
+        EGLContext c = eglCreateContext(d, cfg, EGL_NO_CONTEXT, ctx_attribs);
+        EGLSurface s = eglCreatePbufferSurface(d, cfg, pbuf_attribs);
+        eglMakeCurrent(d, s, s, c);
+        // Touch the context (matches what previous variants did before tearing down).
+        GLuint tex = 0;
+        glGenTextures(1, &tex);
+        glBindTexture(GL_TEXTURE_2D, tex);
+        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8);
+        glDeleteTextures(1, &tex);
+        eglMakeCurrent(d, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroySurface(d, s);
+        eglDestroyContext(d, c);
+    }
+    eglTerminate(d);
+}
+
 // --- Main thread -------------------------------------------------------------
 
 ReproStatus repro_run(uint8_t* pixels) {
     ReproStatus s = {0};
+
+    // Prime the process state to approximate what 18 prior test variants did.
+    // On the `main` branch with those variants in place, this kind of activity
+    // had already happened by the time the cross-context test ran — and the bug
+    // manifested. Without it, the cross-context test alone passes cleanly on
+    // both backends. Establish the minimum preamble needed.
+    LOGI("preamble: 18 eglInit/Terminate cycles");
+    egl_context_churn(18);
 
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLContext main_ctx = EGL_NO_CONTEXT;
