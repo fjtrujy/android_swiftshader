@@ -1,17 +1,16 @@
 // The actual SwiftShader repro — minimal slice.
 //
-// Two test entry points are invoked from Kotlin, in order:
-//   `repro_variant10_offthread_gl`  — Phase 1 (preamble), via JNI runVariant10.
-//   `repro_variant19_shared_context_upload_and_sample`
-//                                   — Phase 2 (test),     via JNI runVariant19.
+// Two entry points are invoked from Kotlin, in order:
+//   `repro_variant10_offthread_gl`              — Phase 1 (preamble).
+//   `repro_variant19_shared_context_upload_and_sample` — Phase 2 (test).
 //
 // See ../README.md for the full call trace + hypotheses.
-//
-// Historical variants 2-9, 11-18 live in `padding.c`. They are not invoked
-// but must be present in the linked library for the bug to reproduce —
-// stripping them makes the bug stop, for reasons we don't understand.
 
-#include "repro_internal.h"
+#include "repro.h"
+
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>
 
 #include <pthread.h>
 #include <stdio.h>
@@ -22,11 +21,17 @@
 #define LOG_TAG "swsrepro"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
 
+// PBO constants — not exposed by the NDK GLES headers we link against.
+#define V_GL_PIXEL_UNPACK_BUFFER       0x88EC
+#define V_GL_MAP_WRITE_BIT             0x0002
+#define V_GL_MAP_INVALIDATE_BUFFER_BIT 0x0008
+#define V_GL_STREAM_DRAW               0x88E0
+
 // ---------------------------------------------------------------------------
-// Shared helpers (non-static so padding.c can also use them).
+// Local helpers.
 // ---------------------------------------------------------------------------
 
-void set_err(ReproStatus* s, const char* msg) {
+static void set_err(ReproStatus* s, const char* msg) {
     s->success = 0;
     size_t n = strlen(msg);
     if (n >= sizeof(s->error)) n = sizeof(s->error) - 1;
@@ -34,7 +39,7 @@ void set_err(ReproStatus* s, const char* msg) {
     s->error[n] = '\0';
 }
 
-int check_gl(ReproStatus* s, const char* where) {
+static int check_gl(ReproStatus* s, const char* where) {
     GLenum err = glGetError();
     if (err == GL_NO_ERROR) return 1;
     char buf[128];
@@ -43,7 +48,7 @@ int check_gl(ReproStatus* s, const char* where) {
     return 0;
 }
 
-GLuint compile_shader(GLenum type, const char* src, ReproStatus* s) {
+static GLuint compile_shader(GLenum type, const char* src, ReproStatus* s) {
     GLuint sh = glCreateShader(type);
     glShaderSource(sh, 1, &src, NULL);
     glCompileShader(sh);
@@ -61,9 +66,11 @@ GLuint compile_shader(GLenum type, const char* src, ReproStatus* s) {
     return sh;
 }
 
+typedef ReproStatus (*WorkFn)(uint8_t* pixels, int width, int height);
+
 // Brings up an offscreen GLES context (version 2 or 3) backed by a 1x1 pbuffer,
 // runs `do_work`, then tears everything down.
-ReproStatus run_with_gl(int gles_version, uint8_t* pixels, int width, int height, WorkFn do_work) {
+static ReproStatus run_with_gl(int gles_version, uint8_t* pixels, int width, int height, WorkFn do_work) {
     ReproStatus s = {0};
 
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
@@ -112,19 +119,19 @@ ReproStatus run_with_gl(int gles_version, uint8_t* pixels, int width, int height
 }
 
 // ---------------------------------------------------------------------------
-// Shaders (non-static; padding.c also uses some of these).
+// Shaders.
 // ---------------------------------------------------------------------------
 
-const char* VS_OFFSET_QUAD_SRC =
+static const char* VS_OFFSET_QUAD_SRC =
     "attribute vec2 a_pos;\n"
     "void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
 
-const char* FS_UNIFORM_COLOR_SRC =
+static const char* FS_UNIFORM_COLOR_SRC =
     "precision mediump float;\n"
     "uniform vec4 u_color;\n"
     "void main() { gl_FragColor = u_color; }\n";
 
-const char* VS_TEXTURED_QUAD_SRC =
+static const char* VS_TEXTURED_QUAD_SRC =
     "attribute vec2 a_pos;\n"
     "attribute vec2 a_uv;\n"
     "varying vec2 v_uv;\n"
@@ -133,7 +140,7 @@ const char* VS_TEXTURED_QUAD_SRC =
     "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
     "}\n";
 
-const char* FS_TEXTURED_QUAD_SRC =
+static const char* FS_TEXTURED_QUAD_SRC =
     "precision mediump float;\n"
     "varying vec2 v_uv;\n"
     "uniform sampler2D u_tex;\n"
@@ -141,10 +148,9 @@ const char* FS_TEXTURED_QUAD_SRC =
 
 // ---------------------------------------------------------------------------
 // Phase 1 helper: a 256x256 RGBA8 FBO + .copy-blend red-quad draw.
-// (Defined non-static for padding.c, which also exercises this pattern.)
 // ---------------------------------------------------------------------------
 
-ReproStatus offset_quad_copy_blend(uint8_t* pixels, int width, int height) {
+static ReproStatus offset_quad_copy_blend(uint8_t* pixels, int width, int height) {
     ReproStatus s = {0};
     GLuint texture = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
 
