@@ -7,21 +7,7 @@ object ReproNative {
     const val HEIGHT = 512
 
     /**
-     * Phase 1 (preamble) — runs an off-thread fresh-context GLES2 draw.
-     *
-     * Spawns a worker pthread which opens its own EGL display, creates a
-     * non-shared GLES2 context with a 1×1 pbuffer, compiles a uniform-color
-     * shader, draws once into a 512×512 RGBA8 FBO, reads back, and tears
-     * everything down. The pixel output is mostly diagnostic; the load-
-     * bearing effect is the EGL/GL activity on a worker thread.
-     *
-     * `outPixels` must be at least WIDTH * HEIGHT * 4 bytes. Returns a
-     * "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>" summary string.
-     */
-    @JvmStatic external fun runPreamble(outPixels: ByteArray): String
-
-    /**
-     * Phase 2 (test) — shared-context cross-thread upload + main-thread sample.
+     * Shared-context cross-thread upload + main-thread sample.
      *
      * Main thread initialises EGL and creates a GLES3 context A. A worker
      * pthread creates context B with `share_context = A`, allocates a
@@ -31,7 +17,7 @@ object ReproNative {
      * draws a full-NDC quad into a 512×512 FBO, reads back.
      *
      * Expected output: every pixel `(255, 0, 0, 255)`.
-     * On `-gpu swiftshader` (after Phase 1 has run): every pixel `(0, 0, 0, 0)`.
+     * On `-gpu swiftshader`: every pixel `(0, 0, 0, 0)`.
      *
      * `outPixels` must be at least WIDTH * HEIGHT * 4 bytes. Returns a
      * "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>" summary string.

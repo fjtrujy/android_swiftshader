@@ -22,12 +22,6 @@ class MainActivity : Activity() {
         outDir.listFiles()?.forEach { it.delete() }
         Log.i(tag, "output dir = ${outDir.absolutePath}")
 
-        // Bisect step: SKIP the preamble entirely. If Phase 2 alone reproduces
-        // the bug on swiftshader, the preamble was never load-bearing — the
-        // bug is purely in Phase 2's shared-context texture path.
-        Log.i(tag, "preamble: skipped (bisect)")
-
-        // Phase 2 — the actual test.
         val testPixels = ByteArray(ReproNative.WIDTH * ReproNative.HEIGHT * 4)
         val testSummary = ReproNative.parse(ReproNative.runTest(testPixels))
         Log.i(
