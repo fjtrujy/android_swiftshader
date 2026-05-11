@@ -17,7 +17,11 @@ class MainActivity : Activity() {
     }
 
     private fun runAllVariants() {
-        val outDir = getExternalFilesDir(null) ?: filesDir
+        // Use internal cache dir — always app-writable, no scoped-storage issues if
+        // the AVD cache carries stale files from a previous run. Pulled by CI via
+        // `adb exec-out run-as <pkg> cat cache/<file>.png`.
+        val outDir = cacheDir
+        outDir.listFiles()?.forEach { it.delete() }
         Log.i(tag, "output dir = ${outDir.absolutePath}")
 
         runByteArrayVariant("variant2", outDir, ReproNative::runVariant2)

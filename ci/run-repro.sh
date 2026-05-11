@@ -39,13 +39,23 @@ adb logcat -d \
   | tee "$OUT_DIR/swsrepro-logcat.txt" \
   || true
 
-echo "=== device-side file listing ==="
-adb shell "ls -la /storage/emulated/0/Android/data/$PKG/files/ 2>&1 || echo 'no files dir'"
+echo "=== device-side cache listing ==="
+adb shell "run-as $PKG ls -la cache/ 2>&1 || echo 'cache dir not readable'"
 
-echo "=== pull PNGs ==="
+echo "=== pull PNGs via run-as (debuggable APK) ==="
 ABS_OUT="$(pwd)/$OUT_DIR/pngs"
 mkdir -p "$ABS_OUT"
-adb pull "/storage/emulated/0/Android/data/$PKG/files/." "$ABS_OUT" || echo "no PNGs to pull"
+for v in variant2 variant3 variant4 variant5 variant6; do
+  dest="$ABS_OUT/$v.png"
+  # exec-out preserves binary bytes (no CRLF mangling).
+  adb exec-out "run-as $PKG cat cache/$v.png" > "$dest" 2>/dev/null || true
+  if [ ! -s "$dest" ]; then
+    rm -f "$dest"
+    echo "  $v: not produced"
+  else
+    echo "  $v: $(wc -c < "$dest") bytes"
+  fi
+done
 
 echo "=== artifacts contents ==="
 echo "cwd=$(pwd)"
