@@ -15,8 +15,8 @@ The same APK on the same emulator with `-gpu swangle` returns the expected red.
 
 ```
                             -gpu swiftshader            -gpu swangle
-variant19 center=(256, 256):    (0, 0, 0, 0)               (255, 0, 0, 255)
-variant19 corner=(0, 0):        (0, 0, 0, 0)               (255, 0, 0, 255)
+test center=(256, 256):    (0, 0, 0, 0)               (255, 0, 0, 255)
+test corner=(0, 0):        (0, 0, 0, 0)               (255, 0, 0, 255)
 ```
 
 | `-gpu` flag | GL_RENDERER |
@@ -28,7 +28,7 @@ variant19 corner=(0, 0):        (0, 0, 0, 0)               (255, 0, 0, 255)
 
 `MainActivity.onCreate` calls into JNI exactly twice, in order:
 
-### Phase 1 — `runVariant10` (preamble)
+### Phase 1 — `runPreamble` (preamble)
 
 Spawns a worker `pthread` which:
 
@@ -54,7 +54,7 @@ Just doing this once on a worker pthread is sufficient priming. No specific
 pixel content matters — only the side effect of an EGL session on a worker
 thread.
 
-### Phase 2 — `runVariant19` (the actual test)
+### Phase 2 — `runTest` (the actual test)
 
 ```
 [main thread]
@@ -212,10 +212,10 @@ CI runs the test automatically on `push` and `workflow_dispatch`
 (`.github/workflows/repro.yml`). Two matrix jobs run the same APK on the same
 emulator with different `-gpu` flags; each uploads:
 
-- `variant10.png`, `variant19.png` — raw `glReadPixels` output via Bitmap.
+- `preamble.png`, `test.png` — raw `glReadPixels` output via Bitmap.
 - `swsrepro-logcat.txt` — the in-app summary lines (raw RGBA center+corner).
 
-Latest green runs (variant19 swiftshader → `(0,0,0,0)`, swangle → red) are linked
+Latest green runs (test swiftshader → `(0,0,0,0)`, swangle → red) are linked
 from the README of each commit's run artefact list.
 
 Locally:
@@ -225,7 +225,7 @@ Locally:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am start -n com.example.swsrepro/.MainActivity
 adb logcat -s swsrepro:I     # summary lines directly from glReadPixels (no Bitmap)
-adb exec-out run-as com.example.swsrepro cat cache/variant19.png > variant19.png
+adb exec-out run-as com.example.swsrepro cat cache/test.png > test.png
 ```
 
 The logcat summary is authoritative — it prints raw RGBA center + corner
@@ -246,7 +246,7 @@ premultiplied-alpha quirks can't mask anything.
 | **`app/src/main/cpp/repro.c`** | ~430 | Read this. Defines the two test entry points and the helpers/shaders they share. |
 | **`app/src/main/cpp/repro_internal.h`** | ~45 | Shared declarations between `repro.c` and `padding.c`. |
 | `app/src/main/cpp/padding.c` | ~1490 | Historical variants 2-9, 11-18 from the bisection. Never invoked but **do not strip** — see "Library-size dependency" above. |
-| `app/src/main/cpp/jni_glue.c` | ~250 | JNI bindings; only `runVariant10` and `runVariant19` are called from Kotlin. |
+| `app/src/main/cpp/jni_glue.c` | ~250 | JNI bindings; only `runPreamble` and `runTest` are called from Kotlin. |
 | `app/src/main/kotlin/com/example/swsrepro/MainActivity.kt` | ~50 | The two-call sequence (Phase 1, Phase 2, PNG save). |
 | `.github/workflows/repro.yml` | ~110 | Matrix CI (`swiftshader` vs `swangle`). |
 
