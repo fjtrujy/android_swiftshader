@@ -705,3 +705,182 @@ ReproStatus repro_variant10_offthread_gl(uint8_t* pixels, int width, int height)
     pthread_join(thread, NULL);
     return args.result;
 }
+
+// ---------------------------------------------------------------------------
+// Variants 11 / 12: chained frame mimicking the Renderer's full per-frame pipeline.
+// ---------------------------------------------------------------------------
+
+#define SWSREPRO_V11_SOURCE_SIZE 256
+#define SWSREPRO_V11_TARGET_W    512
+#define SWSREPRO_V11_TARGET_H    512
+
+// Reusable resources owned by one frame's draw. Survives across iterations in variant 12.
+struct ChainedFrame {
+    GLuint src_texture;
+    GLuint dst_texture;
+    GLuint fbo;
+    GLuint program;
+    GLuint vbo;
+    GLuint vs;
+    GLuint fs;
+    GLint  u_tex;
+};
+
+static int chained_frame_init(struct ChainedFrame* cf, ReproStatus* s) {
+    memset(cf, 0, sizeof(*cf));
+
+    // 1. Source texture (256x256), filled via glTexSubImage2D — the renderer's CPU upload path.
+    size_t src_bytes = SWSREPRO_V11_SOURCE_SIZE * SWSREPRO_V11_SOURCE_SIZE * 4;
+    uint8_t* cpu = malloc(src_bytes);
+    if (!cpu) { set_err(s, "v11 init: malloc failed"); return 0; }
+    for (size_t i = 0; i < src_bytes; i += 4) {
+        cpu[i + 0] = 255; cpu[i + 1] = 0; cpu[i + 2] = 0; cpu[i + 3] = 255;
+    }
+
+    glGenTextures(1, &cf->src_texture);
+    glBindTexture(GL_TEXTURE_2D, cf->src_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                 SWSREPRO_V11_SOURCE_SIZE, SWSREPRO_V11_SOURCE_SIZE, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0,
+                    SWSREPRO_V11_SOURCE_SIZE, SWSREPRO_V11_SOURCE_SIZE,
+                    GL_RGBA, GL_UNSIGNED_BYTE, cpu);
+    free(cpu);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (!check_gl(s, "v11 init: source upload")) return 0;
+
+    // 2. Target texture (512x512) + FBO.
+    glGenTextures(1, &cf->dst_texture);
+    glBindTexture(GL_TEXTURE_2D, cf->dst_texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                 SWSREPRO_V11_TARGET_W, SWSREPRO_V11_TARGET_H, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glGenFramebuffers(1, &cf->fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, cf->fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, cf->dst_texture, 0);
+    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+        char buf[128]; snprintf(buf, sizeof(buf), "v11 FBO incomplete, status=0x%04X", st);
+        set_err(s, buf); return 0;
+    }
+
+    // 3. Program — textured quad sampling from src_texture.
+    cf->vs = compile_shader(GL_VERTEX_SHADER, VS_TEXTURED_QUAD_SRC, s); if (!cf->vs) return 0;
+    cf->fs = compile_shader(GL_FRAGMENT_SHADER, FS_TEXTURED_QUAD_SRC, s); if (!cf->fs) return 0;
+    cf->program = glCreateProgram();
+    glAttachShader(cf->program, cf->vs);
+    glAttachShader(cf->program, cf->fs);
+    glBindAttribLocation(cf->program, 0, "a_pos");
+    glBindAttribLocation(cf->program, 1, "a_uv");
+    glLinkProgram(cf->program);
+    GLint linked = 0; glGetProgramiv(cf->program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[256] = {0}; glGetProgramInfoLog(cf->program, sizeof(log) - 1, NULL, log);
+        char buf[256]; snprintf(buf, sizeof(buf), "v11 link failed: %s", log);
+        set_err(s, buf); return 0;
+    }
+    cf->u_tex = glGetUniformLocation(cf->program, "u_tex");
+
+    // 4. VBO: centered quad in NDC [-0.5, 0.5] × [-0.5, 0.5] (= pixel offset (128, 128)
+    // on a 512x512 viewport). UVs cover the full source texture.
+    static const GLfloat quad[] = {
+        -0.5f, -0.5f, 0.0f, 0.0f,
+         0.5f, -0.5f, 1.0f, 0.0f,
+        -0.5f,  0.5f, 0.0f, 1.0f,
+         0.5f,  0.5f, 1.0f, 1.0f,
+    };
+    glGenBuffers(1, &cf->vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, cf->vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+
+    return 1;
+}
+
+static void chained_frame_destroy(struct ChainedFrame* cf) {
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (cf->vbo) glDeleteBuffers(1, &cf->vbo);
+    if (cf->program) glDeleteProgram(cf->program);
+    if (cf->vs) glDeleteShader(cf->vs);
+    if (cf->fs) glDeleteShader(cf->fs);
+    if (cf->fbo) glDeleteFramebuffers(1, &cf->fbo);
+    if (cf->src_texture) glDeleteTextures(1, &cf->src_texture);
+    if (cf->dst_texture) glDeleteTextures(1, &cf->dst_texture);
+}
+
+// One render-pass: target FBO is cleared, source texture is sampled, quad is drawn.
+// Does not read back — caller does that.
+static void chained_frame_draw(struct ChainedFrame* cf) {
+    glBindFramebuffer(GL_FRAMEBUFFER, cf->fbo);
+    glViewport(0, 0, SWSREPRO_V11_TARGET_W, SWSREPRO_V11_TARGET_H);
+    glDisable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ZERO);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(cf->program);
+    glBindBuffer(GL_ARRAY_BUFFER, cf->vbo);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), NULL);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+                          (const void*)(2 * sizeof(GLfloat)));
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, cf->src_texture);
+    glUniform1i(cf->u_tex, 0);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+static ReproStatus chained_frame_single(uint8_t* pixels, int width, int height) {
+    (void)width; (void)height;
+    ReproStatus s = {0};
+    struct ChainedFrame cf;
+    if (!chained_frame_init(&cf, &s)) { chained_frame_destroy(&cf); return s; }
+
+    chained_frame_draw(&cf);
+    glFinish();
+    glReadPixels(0, 0, SWSREPRO_V11_TARGET_W, SWSREPRO_V11_TARGET_H,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (check_gl(&s, "v11 readback")) s.success = 1;
+
+    chained_frame_destroy(&cf);
+    return s;
+}
+
+ReproStatus repro_variant11_chained_frame(uint8_t* pixels, int width, int height) {
+    LOGI("variant11: CPU-upload + texture-sample + .copy blend, single chained frame (%dx%d)", width, height);
+    return run_with_gl(2, pixels, width, height, chained_frame_single);
+}
+
+#define SWSREPRO_V12_ITERATIONS 50
+
+static ReproStatus chained_frame_loop(uint8_t* pixels, int width, int height) {
+    (void)width; (void)height;
+    ReproStatus s = {0};
+    struct ChainedFrame cf;
+    if (!chained_frame_init(&cf, &s)) { chained_frame_destroy(&cf); return s; }
+
+    for (int i = 0; i < SWSREPRO_V12_ITERATIONS; i++) {
+        chained_frame_draw(&cf);
+        glFinish();
+    }
+
+    glReadPixels(0, 0, SWSREPRO_V11_TARGET_W, SWSREPRO_V11_TARGET_H,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (check_gl(&s, "v12 readback")) s.success = 1;
+
+    chained_frame_destroy(&cf);
+    return s;
+}
+
+ReproStatus repro_variant12_multiframe_loop(uint8_t* pixels, int width, int height) {
+    LOGI("variant12: chained-frame loop x%d (%dx%d)", SWSREPRO_V12_ITERATIONS, width, height);
+    return run_with_gl(2, pixels, width, height, chained_frame_loop);
+}

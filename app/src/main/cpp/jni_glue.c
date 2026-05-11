@@ -111,20 +111,19 @@ Java_com_example_swsrepro_ReproNative_runVariant9(JNIEnv* env, jclass clazz, jby
     return run_bytearray_variant(env, out_pixels, repro_variant9_texsubimage_upload);
 }
 
-JNIEXPORT jstring JNICALL
-Java_com_example_swsrepro_ReproNative_runVariant10(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
-    (void)clazz;
-    // Variant 10 reuses variant 7's draw on a worker thread → same 512x512 framebuffer size.
+static jstring run_v512_variant(JNIEnv* env, jbyteArray out_pixels,
+                                 const char* name, VariantFn fn) {
     const int W = SWSREPRO_V7_WIDTH, H = SWSREPRO_V7_HEIGHT;
     jsize len = (*env)->GetArrayLength(env, out_pixels);
     if (len < W * H * 4) {
-        ReproStatus s = {0, "variant10 out_pixels too small (need 512*512*4)"};
+        ReproStatus s = {0};
+        snprintf(s.error, sizeof(s.error), "%s out_pixels too small (need 512*512*4)", name);
         return make_summary(env, &s, NULL, 0, 0);
     }
     uint8_t* pixels = malloc(W * H * 4);
     if (!pixels) { ReproStatus s = {0, "malloc failed"}; return make_summary(env, &s, NULL, 0, 0); }
 
-    ReproStatus s = repro_variant10_offthread_gl(pixels, W, H);
+    ReproStatus s = fn(pixels, W, H);
 
     if (s.success) {
         (*env)->SetByteArrayRegion(env, out_pixels, 0, W * H * 4, (const jbyte*)pixels);
@@ -132,6 +131,24 @@ Java_com_example_swsrepro_ReproNative_runVariant10(JNIEnv* env, jclass clazz, jb
     jstring summary = make_summary(env, &s, pixels, W, H);
     free(pixels);
     return summary;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant10(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    return run_v512_variant(env, out_pixels, "variant10", repro_variant10_offthread_gl);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant11(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    return run_v512_variant(env, out_pixels, "variant11", repro_variant11_chained_frame);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant12(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    return run_v512_variant(env, out_pixels, "variant12", repro_variant12_multiframe_loop);
 }
 
 JNIEXPORT jstring JNICALL

@@ -189,3 +189,82 @@ Note the two SwiftShader code paths produce *different* `GL_RENDERER`
 strings ("Google SwiftShader" vs "SwiftShader driver-5.0.0 / Subzero").
 That's the user-visible signal that they are different builds with
 potentially different bug surfaces.
+
+---
+
+## Negative result — what 10 minimal C variants told us
+
+After implementing variants 2–10 (clear, shader, MSAA, sRGB, offset-quad
+with `.copy` blend, texture sampling, `glTexSubImage2D` upload, off-thread
+GL), **every single one passed with exact expected pixel values on both
+`-gpu swiftshader` and `-gpu swangle`**.
+
+That means **none of these GL operations, in isolation, reproduce the
+(255, 255, 255, 0) bug on Linux x86_64 CI.**
+
+This is a non-trivial finding. It rules out, at minimum:
+
+- The Android Bitmap mapping / `lockPixels` write path.
+- Basic `glClear` + `glReadPixels` on RGBA8 textures.
+- Shader compilation, linking, and rasterization (single triangle / quad).
+- MSAA renderbuffers + `glBlitFramebuffer` resolve.
+- sRGB-encoded color framebuffers.
+- Partial-extent draws at NDC offsets.
+- `.copy` blendMode emulation (`glDisable(GL_BLEND) + glBlendFunc(GL_ONE, GL_ZERO)`).
+- Texture sampling in a fragment shader.
+- CPU buffer → GL texture upload via `glTexSubImage2D`.
+- Off-thread GL with a fresh EGL context on a pthread.
+
+Variants 11 and 12 (chained pipeline mirroring the renderer's per-frame
+sequence; multi-frame loop) are the last remaining narrowing attempts at
+the GL-primitive level.
+
+## What the negative result means strategically
+
+If variants 11 and 12 also pass, the bug is *not* an upstream SwiftShader
+bug at the GL-API level, and **filing against `google/swiftshader` is
+likely premature.** The likely remaining explanations, in priority order:
+
+1. **The bug is in our Swift Renderer's specific GL setup**, not in any
+   GL operation we issue. Possibilities:
+   - A Swift overlay over `libGLESv3` (e.g. `swift-gles3` package, or
+     hand-written `@_silgen_name` shims) does something subtly wrong with
+     type marshaling, calling conventions, or symbol resolution that
+     causes calls to be silently dropped.
+   - The renderer initialises GL state during a *different* lifecycle
+     event than our repro (e.g. inside a Swift static initialiser, before
+     the EGL context is fully wired in some thread), so its calls hit a
+     half-set-up state.
+   - The renderer's EGL config is asking for something specific (a
+     `EGL_DEPTH_SIZE > 0`, particular pixel format, multiple contexts
+     sharing resources) that we haven't replicated.
+2. **The bug requires the Swift Testing runtime / xctest harness** on
+   Android. The way Swift Testing JIT-installs tests might collide with
+   GL state in ways a plain Kotlin Activity doesn't.
+3. **The bug requires a specific GL extension** that the renderer enables
+   (e.g. `GL_OES_EGL_image_external`, `GL_EXT_shader_framebuffer_fetch`,
+   `GL_OES_texture_storage_multisample_2d_array`) and that SwiftShader
+   handles incorrectly.
+
+### Recommended next moves if variants 11/12 also pass
+
+Stop adding C/NDK variants and pivot:
+
+- **Pull the actual Swift Renderer GL initialisation code into this repo**
+  as a minimal Swift Android app. Use the Swift Android SDK + the
+  `Renderer.GPUContext` abstraction; reproduce the canonical scene.
+  Bigger investment but much closer to the failing environment.
+- **Capture an apitrace** from the failing GoodNotes Renderer CI run
+  (`EMULATOR_GLES_TRACE=1` or the in-tree `gltrace` tools). Compare the
+  GL call sequence against this repo's working variants 11/12. The
+  divergence point IS the bug surface.
+- **Bisect the renderer code itself**: comment out features in the
+  Renderer until the bug disappears. The last operation removed is
+  the smoking gun.
+- **Compare against a different Android image / emulator version**.
+  If the bug is regression-specific (e.g. only on emulator 36.x with
+  system-image android-35), maintainers will need that version
+  metadata before they can repro.
+
+If variants 11/12 *do* reproduce the bug, then we have a small C/NDK
+repro and can file straight upstream.

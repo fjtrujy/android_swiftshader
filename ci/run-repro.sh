@@ -45,7 +45,7 @@ adb shell "run-as $PKG ls -la cache/ 2>&1 || echo 'cache dir not readable'"
 echo "=== pull PNGs via run-as (debuggable APK) ==="
 ABS_OUT="$(pwd)/$OUT_DIR/pngs"
 mkdir -p "$ABS_OUT"
-for v in variant2 variant3 variant4 variant5 variant6 variant7 variant8 variant9 variant10; do
+for v in variant2 variant3 variant4 variant5 variant6 variant7 variant8 variant9 variant10 variant11 variant12; do
   dest="$ABS_OUT/$v.png"
   # exec-out preserves binary bytes (no CRLF mangling).
   adb exec-out "run-as $PKG cat cache/$v.png" > "$dest" 2>/dev/null || true

@@ -75,4 +75,22 @@ ReproStatus repro_variant9_texsubimage_upload(uint8_t* pixels, int width, int he
 // Expected: same as variant 7.
 ReproStatus repro_variant10_offthread_gl(uint8_t* pixels, int width, int height);
 
+// Variant 11: chained frame — combines variant 9 (CPU upload via glTexSubImage2D) and
+// variant 8 (texture sampling) inside one render pass on a 512x512 target FBO at the
+// canonical offset (128, 128). Mirrors the renderer's actual per-frame pipeline:
+//   1. Upload CPU rasterizer output to a source texture (glTexSubImage2D).
+//   2. Bind target FBO, clear to transparent black.
+//   3. Sample source via textured quad shader, .copy blend mode, draw offset quad.
+//   4. glFinish + glReadPixels.
+// Expected:
+//   - center (256, 256) inside the sampled quad: (255, 0, 0, 255).
+//   - corner (0, 0)   outside the quad:         (0, 0, 0, 0).
+ReproStatus repro_variant11_chained_frame(uint8_t* pixels, int width, int height);
+
+// Variant 12: multi-frame loop. Repeats variant 11's full chain 50 times against the
+// same GL context, only reading back on the final iteration. Tests whether state leaks
+// across frames cause SwiftShader to drift toward the (255, 255, 255, 0) sentinel.
+// Expected: same as variant 11.
+ReproStatus repro_variant12_multiframe_loop(uint8_t* pixels, int width, int height);
+
 #endif

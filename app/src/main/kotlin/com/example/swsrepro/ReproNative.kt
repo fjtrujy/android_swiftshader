@@ -49,6 +49,12 @@ object ReproNative {
     /** Variant 10: variant 7 driven on a worker pthread, off the main thread. */
     @JvmStatic external fun runVariant10(outPixels: ByteArray): String
 
+    /** Variant 11: full chained per-frame pipeline (CPU upload + texture sample + .copy blend). */
+    @JvmStatic external fun runVariant11(outPixels: ByteArray): String
+
+    /** Variant 12: chained-frame loop x50 against the same GL context. */
+    @JvmStatic external fun runVariant12(outPixels: ByteArray): String
+
     data class Summary(
         val success: Boolean,
         val error: String,
