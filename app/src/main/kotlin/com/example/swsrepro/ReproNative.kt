@@ -93,6 +93,13 @@ object ReproNative {
     /** Variant 18: drawArraysInstanced + sampler2DArray with per-instance layer. */
     @JvmStatic external fun runVariant18(outPixels: ByteArray): String
 
+    /**
+     * Variant 19: shared-context cross-thread upload + render-thread sample.
+     * Mirrors the renderer's BackgroundGLUploader pattern. `outPixels` must be
+     * 512*512*4 bytes.
+     */
+    @JvmStatic external fun runVariant19(outPixels: ByteArray): String
+
     data class Summary(
         val success: Boolean,
         val error: String,

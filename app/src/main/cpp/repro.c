@@ -1716,3 +1716,249 @@ ReproStatus repro_variant18_sampler_2d_array(uint8_t* pixels, int width, int hei
     LOGI("variant18: drawArraysInstanced + sampler2DArray with per-instance layer (%dx%d)", width, height);
     return run_with_gl(3, pixels, width, height, sampler_2d_array);
 }
+
+// ---------------------------------------------------------------------------
+// Variant 19: shared-context cross-thread upload + render-thread sample.
+// Mirrors the renderer's BackgroundGLUploader pattern.
+// ---------------------------------------------------------------------------
+
+#define V19_SOURCE_SIZE 256
+#define V19_TARGET_W    512
+#define V19_TARGET_H    512
+
+struct V19Shared {
+    EGLDisplay display;
+    EGLConfig  config;
+    EGLContext main_context;
+    GLuint     texture;   // Created by worker, sampled by main.
+    GLsync     fence;     // Set by worker, waited by main.
+    int        worker_ok;
+    char       worker_err[128];
+};
+
+static void* v19_worker(void* arg) {
+    struct V19Shared* shared = (struct V19Shared*)arg;
+    shared->worker_ok = 0;
+    shared->worker_err[0] = '\0';
+
+    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+    EGLContext worker_context = eglCreateContext(shared->display, shared->config,
+                                                  shared->main_context, ctx_attribs);
+    if (worker_context == EGL_NO_CONTEXT) {
+        snprintf(shared->worker_err, sizeof(shared->worker_err),
+                 "worker eglCreateContext (shared) failed, eglError=0x%04X", eglGetError());
+        return NULL;
+    }
+
+    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    EGLSurface worker_surface = eglCreatePbufferSurface(shared->display, shared->config, pbuf_attribs);
+    if (worker_surface == EGL_NO_SURFACE) {
+        snprintf(shared->worker_err, sizeof(shared->worker_err), "worker pbuffer failed");
+        eglDestroyContext(shared->display, worker_context);
+        return NULL;
+    }
+
+    if (!eglMakeCurrent(shared->display, worker_surface, worker_surface, worker_context)) {
+        snprintf(shared->worker_err, sizeof(shared->worker_err), "worker makeCurrent failed");
+        eglDestroySurface(shared->display, worker_surface);
+        eglDestroyContext(shared->display, worker_context);
+        return NULL;
+    }
+
+    // Create texture (will be visible to main via share group), allocate, upload red pixels.
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, V19_SOURCE_SIZE, V19_SOURCE_SIZE);
+
+    // Upload via PBO — mirrors the renderer's path.
+    GLuint pbo = 0;
+    glGenBuffers(1, &pbo);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    size_t byteSize = (size_t)V19_SOURCE_SIZE * (size_t)V19_SOURCE_SIZE * 4;
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, GL_STREAM_DRAW);
+    void* mapped = glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
+                                           GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
+    if (!mapped) {
+        snprintf(shared->worker_err, sizeof(shared->worker_err), "worker glMapBufferRange returned NULL");
+        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+        glDeleteBuffers(1, &pbo);
+        glDeleteTextures(1, &tex);
+        eglMakeCurrent(shared->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroySurface(shared->display, worker_surface);
+        eglDestroyContext(shared->display, worker_context);
+        return NULL;
+    }
+    uint8_t* m = (uint8_t*)mapped;
+    for (size_t i = 0; i < byteSize; i += 4) {
+        m[i+0] = 255; m[i+1] = 0; m[i+2] = 0; m[i+3] = 255;
+    }
+    glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, V19_SOURCE_SIZE, V19_SOURCE_SIZE,
+                          GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)0);
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glDeleteBuffers(1, &pbo);
+
+    // Fence the upload, flush so it's submitted to the GPU command queue.
+    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    glFlush();
+
+    // Hand texture + fence to the main thread.
+    shared->texture = tex;
+    shared->fence   = fence;
+    shared->worker_ok = 1;
+
+    // Release context before joining (renderer's BG uploader does this too — context
+    // must not be current on this thread when main needs to bind it elsewhere).
+    eglMakeCurrent(shared->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    eglDestroySurface(shared->display, worker_surface);
+    eglDestroyContext(shared->display, worker_context);
+    return NULL;
+}
+
+// EGL constants needed locally for the PBO path.
+#define GL_PIXEL_UNPACK_BUFFER          0x88EC
+#define GL_MAP_WRITE_BIT                0x0002
+#define GL_MAP_INVALIDATE_BUFFER_BIT    0x0008
+#define GL_STREAM_DRAW                  0x88E0
+
+static ReproStatus v19_main_path(uint8_t* pixels, int width, int height) {
+    (void)width; (void)height;
+    ReproStatus s = {0};
+    EGLDisplay display = EGL_NO_DISPLAY;
+    EGLContext main_context = EGL_NO_CONTEXT;
+    EGLSurface main_surface = EGL_NO_SURFACE;
+    GLuint dst_tex = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
+    pthread_t worker_thread = 0;
+    int worker_started = 0;
+    struct V19Shared shared = {0};
+
+    // --- Main EGL setup ---
+    display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (display == EGL_NO_DISPLAY) { set_err(&s, "v19 main eglGetDisplay"); goto cleanup; }
+    if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "v19 main eglInitialize"); goto cleanup; }
+
+    const EGLint cfg_attribs[] = {
+        EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_NONE
+    };
+    EGLConfig config;
+    EGLint num_configs = 0;
+    if (!eglChooseConfig(display, cfg_attribs, &config, 1, &num_configs) || num_configs < 1) {
+        set_err(&s, "v19 main eglChooseConfig"); goto cleanup;
+    }
+
+    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+    main_context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
+    if (main_context == EGL_NO_CONTEXT) { set_err(&s, "v19 main eglCreateContext"); goto cleanup; }
+
+    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    main_surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
+    if (main_surface == EGL_NO_SURFACE) { set_err(&s, "v19 main pbuffer"); goto cleanup; }
+
+    if (!eglMakeCurrent(display, main_surface, main_surface, main_context)) {
+        set_err(&s, "v19 main makeCurrent"); goto cleanup;
+    }
+
+    // --- Spawn worker thread to upload shared texture + create fence ---
+    shared.display = display;
+    shared.config = config;
+    shared.main_context = main_context;
+    if (pthread_create(&worker_thread, NULL, v19_worker, &shared) != 0) {
+        set_err(&s, "v19 pthread_create failed"); goto cleanup;
+    }
+    worker_started = 1;
+    pthread_join(worker_thread, NULL);
+    if (!shared.worker_ok) {
+        char buf[200];
+        snprintf(buf, sizeof(buf), "v19 worker failed: %s", shared.worker_err);
+        set_err(&s, buf); goto cleanup;
+    }
+
+    // --- Main thread: glWaitSync, then sample worker's texture and draw ---
+    glWaitSync(shared.fence, 0, GL_TIMEOUT_IGNORED);
+    glDeleteSync(shared.fence);
+
+    // Target FBO.
+    glGenTextures(1, &dst_tex);
+    glBindTexture(GL_TEXTURE_2D, dst_tex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, V19_TARGET_W, V19_TARGET_H, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        set_err(&s, "v19 main FBO incomplete"); goto cleanup;
+    }
+
+    vs = compile_shader(GL_VERTEX_SHADER, VS_TEXTURED_QUAD_SRC, &s); if (!vs) goto cleanup;
+    fs = compile_shader(GL_FRAGMENT_SHADER, FS_TEXTURED_QUAD_SRC, &s); if (!fs) goto cleanup;
+    program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "a_pos");
+    glBindAttribLocation(program, 1, "a_uv");
+    glLinkProgram(program);
+    GLint linked = 0; glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) { set_err(&s, "v19 link failed"); goto cleanup; }
+    glUseProgram(program);
+
+    static const GLfloat quad[] = {
+        -1.f, -1.f, 0.f, 0.f,
+         1.f, -1.f, 1.f, 0.f,
+        -1.f,  1.f, 0.f, 1.f,
+         1.f,  1.f, 1.f, 1.f,
+    };
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), NULL);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+                          (const void*)(2 * sizeof(GLfloat)));
+
+    // Sample the WORKER-uploaded texture.
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, shared.texture);
+    GLint u_tex = glGetUniformLocation(program, "u_tex");
+    glUniform1i(u_tex, 0);
+
+    glViewport(0, 0, V19_TARGET_W, V19_TARGET_H);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glFinish();
+
+    glReadPixels(0, 0, V19_TARGET_W, V19_TARGET_H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(&s, "v19 readback")) goto cleanup;
+
+    s.success = 1;
+
+cleanup:
+    if (shared.texture) glDeleteTextures(1, &shared.texture);
+    if (vbo) glDeleteBuffers(1, &vbo);
+    if (program) glDeleteProgram(program);
+    if (vs) glDeleteShader(vs);
+    if (fs) glDeleteShader(fs);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (dst_tex) glDeleteTextures(1, &dst_tex);
+    if (main_surface != EGL_NO_SURFACE) {
+        eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroySurface(display, main_surface);
+    }
+    if (main_context != EGL_NO_CONTEXT) eglDestroyContext(display, main_context);
+    if (display != EGL_NO_DISPLAY) eglTerminate(display);
+    (void)worker_started;
+    return s;
+}
+
+ReproStatus repro_variant19_shared_context_upload_and_sample(uint8_t* pixels, int width, int height) {
+    LOGI("variant19: shared-context worker uploads via PBO+fence, main glWaitSync + samples (%dx%d)", width, height);
+    return v19_main_path(pixels, width, height);
+}

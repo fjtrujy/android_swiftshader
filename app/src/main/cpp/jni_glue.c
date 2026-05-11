@@ -190,6 +190,12 @@ Java_com_example_swsrepro_ReproNative_runVariant18(JNIEnv* env, jclass clazz, jb
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant19(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    return run_v512_variant(env, out_pixels, "variant19", repro_variant19_shared_context_upload_and_sample);
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_example_swsrepro_ReproNative_runVariant7(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
     (void)clazz;
     const int W = SWSREPRO_V7_WIDTH, H = SWSREPRO_V7_HEIGHT;

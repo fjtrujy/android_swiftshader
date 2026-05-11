@@ -163,4 +163,18 @@ ReproStatus repro_variant17_sampler_array_dynamic_index(uint8_t* pixels, int wid
 // Expected: every pixel red.
 ReproStatus repro_variant18_sampler_2d_array(uint8_t* pixels, int width, int height);
 
+// Variant 19: SHARED EGL context cross-thread texture upload with fence sync, then
+// sample on the render thread. Mirrors the renderer's `BackgroundGLUploader` pattern:
+//   - Main thread: create primary EGL context A, make current with pbuffer.
+//   - Worker thread (pthread): create EGL context B with `share_context = A`, make
+//     current with its own pbuffer, allocate texture via glTexStorage2D, upload red
+//     pixels via PBO + glTexSubImage2D, glFenceSync, glFlush, release context.
+//   - Main thread: glWaitSync(fence), then sample the texture in a shader, draw
+//     a full quad with normal blend, glReadPixels.
+// Expected: every pixel red.
+// This is the closest minimal-NDK approximation of the renderer's actual upload+sample
+// flow that any of my variants have attempted. If SwiftShader has a cross-context
+// texture-visibility bug, this should hit it.
+ReproStatus repro_variant19_shared_context_upload_and_sample(uint8_t* pixels, int width, int height);
+
 #endif
