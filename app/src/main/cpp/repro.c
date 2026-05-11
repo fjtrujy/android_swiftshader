@@ -179,8 +179,14 @@ static void* preamble_worker(void* arg) {
          (const char*)glGetString(GL_VENDOR),
          (const char*)glGetString(GL_RENDERER));
 
-    uint8_t scratch[512 * 512 * 4];
-    p->result = preamble_gl_work(scratch, 512, 512);
+    // Heap-allocated (don't put 1 MB on the worker pthread's stack).
+    uint8_t* scratch = malloc(512 * 512 * 4);
+    if (!scratch) {
+        set_err(&p->result, "preamble worker: malloc(512*512*4) failed");
+    } else {
+        p->result = preamble_gl_work(scratch, 512, 512);
+        free(scratch);
+    }
 
     eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     eglDestroySurface(display, surface);
