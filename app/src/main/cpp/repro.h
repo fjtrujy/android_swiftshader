@@ -7,6 +7,11 @@
 #define SWSREPRO_WIDTH  256
 #define SWSREPRO_HEIGHT 256
 
+// Variant 7 mirrors the GoodNotes Renderer's canonical failing scene exactly,
+// so the framebuffer is 512x512 to match the page size that historically failed.
+#define SWSREPRO_V7_WIDTH  512
+#define SWSREPRO_V7_HEIGHT 512
+
 // Result of a single variant run.
 // On success: error[0] == 0, pixels filled with width*height*4 bytes RGBA.
 // On failure: error contains a null-terminated description.
@@ -42,5 +47,13 @@ ReproStatus repro_variant5_msaa_resolve(uint8_t* pixels, int width, int height);
 // Expected: every pixel == (255, 0, 0, 255) (sRGB encoding of 1.0 is still 1.0).
 // Requires GLES3.
 ReproStatus repro_variant6_srgb_framebuffer(uint8_t* pixels, int width, int height);
+
+// Variant 7: mirrors GoodNotes Renderer's `drawColoredRectangle` (`.copy` blendMode) call.
+// 512x512 RGBA8 FBO, clear to transparent black (0, 0, 0, 0), then draw a 256x256 red quad
+// at pixel offset (128, 128) using `glDisable(GL_BLEND) + glBlendFunc(GL_ONE, GL_ZERO)`.
+// Expected:
+//   - center pixel (256, 256) inside the quad: (255, 0, 0, 255)
+//   - corner pixel (0, 0)   outside the quad: (0, 0, 0, 0)
+ReproStatus repro_variant7_offset_quad_copy_blend(uint8_t* pixels, int width, int height);
 
 #endif

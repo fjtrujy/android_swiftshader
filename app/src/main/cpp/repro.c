@@ -379,3 +379,107 @@ ReproStatus repro_variant6_srgb_framebuffer(uint8_t* pixels, int width, int heig
     LOGI("variant6: SRGB8_ALPHA8 FBO + glClear(opaque-red) + readback (%dx%d)", width, height);
     return run_with_gl(3, pixels, width, height, srgb_framebuffer);
 }
+
+// ---------------------------------------------------------------------------
+// Variant 7: offset partial-quad with .copy blend on a transparent-black background.
+// Mirrors the GoodNotes Renderer's `drawColoredRectangle` call against the
+// canonical failing scene (512x512, 256x256 red rect at (128, 128)).
+// ---------------------------------------------------------------------------
+
+// Vertex shader: pass an NDC [-1, 1] position straight through.
+static const char* VS_OFFSET_QUAD_SRC =
+    "attribute vec2 a_pos;\n"
+    "void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
+
+// Fragment shader: solid color from a uniform.
+static const char* FS_UNIFORM_COLOR_SRC =
+    "precision mediump float;\n"
+    "uniform vec4 u_color;\n"
+    "void main() { gl_FragColor = u_color; }\n";
+
+static ReproStatus offset_quad_copy_blend(uint8_t* pixels, int width, int height) {
+    ReproStatus s = {0};
+
+    GLuint texture = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (st != GL_FRAMEBUFFER_COMPLETE) {
+        char buf[128]; snprintf(buf, sizeof(buf), "variant7 FBO incomplete, status=0x%04X", st);
+        set_err(&s, buf); goto cleanup;
+    }
+
+    vs = compile_shader(GL_VERTEX_SHADER, VS_OFFSET_QUAD_SRC, &s); if (!vs) goto cleanup;
+    fs = compile_shader(GL_FRAGMENT_SHADER, FS_UNIFORM_COLOR_SRC, &s); if (!fs) goto cleanup;
+
+    program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glBindAttribLocation(program, 0, "a_pos");
+    glLinkProgram(program);
+    GLint linked = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        char log[256] = {0}; glGetProgramInfoLog(program, sizeof(log) - 1, NULL, log);
+        char buf[256]; snprintf(buf, sizeof(buf), "variant7 link failed: %s", log);
+        set_err(&s, buf); goto cleanup;
+    }
+    glUseProgram(program);
+    GLint u_color = glGetUniformLocation(program, "u_color");
+
+    // Quad covering the middle half of NDC ([-0.5, 0.5]) = pixel (128, 128) → (384, 384)
+    // in a 512x512 viewport.
+    static const GLfloat quad[] = {
+        -0.5f, -0.5f,
+         0.5f, -0.5f,
+        -0.5f,  0.5f,
+         0.5f,  0.5f,
+    };
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
+
+    glViewport(0, 0, width, height);
+
+    // .copy blendMode = source replaces destination, no alpha blending.
+    glDisable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ZERO);
+
+    // Clear to transparent black (this is the corner color we expect to survive).
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // Draw the centered red quad.
+    glUniform4f(u_color, 1.0f, 0.0f, 0.0f, 1.0f); // opaque red
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glFinish();
+
+    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(&s, "variant7 readback")) goto cleanup;
+
+    s.success = 1;
+
+cleanup:
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (vbo) glDeleteBuffers(1, &vbo);
+    if (program) glDeleteProgram(program);
+    if (vs) glDeleteShader(vs);
+    if (fs) glDeleteShader(fs);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
+    if (texture) glDeleteTextures(1, &texture);
+    return s;
+}
+
+ReproStatus repro_variant7_offset_quad_copy_blend(uint8_t* pixels, int width, int height) {
+    LOGI("variant7: offset red quad with .copy blend on transparent-black bg (%dx%d)", width, height);
+    return run_with_gl(2, pixels, width, height, offset_quad_copy_blend);
+}

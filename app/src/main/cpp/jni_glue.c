@@ -100,6 +100,28 @@ Java_com_example_swsrepro_ReproNative_runVariant6(JNIEnv* env, jclass clazz, jby
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant7(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    const int W = SWSREPRO_V7_WIDTH, H = SWSREPRO_V7_HEIGHT;
+    jsize len = (*env)->GetArrayLength(env, out_pixels);
+    if (len < W * H * 4) {
+        ReproStatus s = {0, "variant7 out_pixels too small (need 512*512*4)"};
+        return make_summary(env, &s, NULL, 0, 0);
+    }
+    uint8_t* pixels = malloc(W * H * 4);
+    if (!pixels) { ReproStatus s = {0, "malloc failed"}; return make_summary(env, &s, NULL, 0, 0); }
+
+    ReproStatus s = repro_variant7_offset_quad_copy_blend(pixels, W, H);
+
+    if (s.success) {
+        (*env)->SetByteArrayRegion(env, out_pixels, 0, W * H * 4, (const jbyte*)pixels);
+    }
+    jstring summary = make_summary(env, &s, pixels, W, H);
+    free(pixels);
+    return summary;
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_example_swsrepro_ReproNative_runVariant3(JNIEnv* env, jclass clazz, jobject bitmap) {
     (void)clazz;
     AndroidBitmapInfo info;

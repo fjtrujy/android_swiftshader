@@ -8,6 +8,10 @@ object ReproNative {
     const val WIDTH = 256
     const val HEIGHT = 256
 
+    // Variant 7 uses a larger framebuffer (mirrors the renderer's canonical scene).
+    const val WIDTH_V7 = 512
+    const val HEIGHT_V7 = 512
+
     /**
      * Returns a summary string: "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>".
      * On success, `outPixels` is filled with WIDTH*HEIGHT*4 RGBA bytes.
@@ -28,6 +32,13 @@ object ReproNative {
 
     /** Variant 6: GL_SRGB8_ALPHA8 color texture FBO + clear + readback. */
     @JvmStatic external fun runVariant6(outPixels: ByteArray): String
+
+    /**
+     * Variant 7: 512x512 FBO, clear to (0, 0, 0, 0), draw 256x256 red quad at offset (128, 128)
+     * with `.copy` blend (`glDisable(GL_BLEND); glBlendFunc(GL_ONE, GL_ZERO)`). Mirrors the
+     * GoodNotes Renderer's `drawColoredRectangle` call. `outPixels` must be 512*512*4 bytes.
+     */
+    @JvmStatic external fun runVariant7(outPixels: ByteArray): String
 
     data class Summary(
         val success: Boolean,

@@ -29,19 +29,29 @@ class MainActivity : Activity() {
         runByteArrayVariant("variant4", outDir, ReproNative::runVariant4)
         runByteArrayVariant("variant5", outDir, ReproNative::runVariant5)
         runByteArrayVariant("variant6", outDir, ReproNative::runVariant6)
+        runByteArrayVariant(
+            "variant7", outDir, ReproNative::runVariant7,
+            width = ReproNative.WIDTH_V7, height = ReproNative.HEIGHT_V7
+        )
 
         Log.i(tag, "all variants finished")
         finish()
     }
 
-    private fun runByteArrayVariant(name: String, outDir: File, fn: (ByteArray) -> String) {
-        val pixels = ByteArray(ReproNative.WIDTH * ReproNative.HEIGHT * 4)
+    private fun runByteArrayVariant(
+        name: String,
+        outDir: File,
+        fn: (ByteArray) -> String,
+        width: Int = ReproNative.WIDTH,
+        height: Int = ReproNative.HEIGHT,
+    ) {
+        val pixels = ByteArray(width * height * 4)
         val summary = ReproNative.parse(fn(pixels))
         Log.i(tag, "$name summary: success=${summary.success} err='${summary.error}' " +
                 "center=${summary.center.toList()} corner=${summary.corner.toList()}")
         if (!summary.success) return
 
-        val bmp = Bitmap.createBitmap(ReproNative.WIDTH, ReproNative.HEIGHT, Bitmap.Config.ARGB_8888)
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         bmp.copyPixelsFromBuffer(ByteBuffer.wrap(pixels))
         savePng(bmp, File(outDir, "$name.png"))
     }
