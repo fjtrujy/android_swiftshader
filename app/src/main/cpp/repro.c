@@ -87,9 +87,9 @@ static const char* FS_TEXTURED_QUAD_SRC =
 
 // ---------------------------------------------------------------------------
 // Phase 1: variant10 — preamble.
-// Bisect step: drop the pbuffer surface — just create + destroy an EGL
-// context. If the bug still reproduces, the trigger needs only a transient
-// EGL context (no surface, no makeCurrent, no GL work) before Phase 2.
+// Bisect step: drop the context — just eglInitialize + eglTerminate on
+// EGL_DEFAULT_DISPLAY. If the bug still reproduces, the trigger is just
+// "an EGL init/terminate cycle on the default display before Phase 2".
 // ---------------------------------------------------------------------------
 
 static ReproStatus v10_bare_egl(void) {
@@ -99,25 +99,9 @@ static ReproStatus v10_bare_egl(void) {
     if (display == EGL_NO_DISPLAY) { set_err(&s, "v10 bare eglGetDisplay"); return s; }
     if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "v10 bare eglInitialize"); return s; }
 
-    const EGLint cfg_attribs[] = {
-        EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
-        EGL_NONE
-    };
-    EGLConfig config;
-    EGLint num_configs = 0;
-    if (!eglChooseConfig(display, cfg_attribs, &config, 1, &num_configs) || num_configs < 1) {
-        set_err(&s, "v10 bare eglChooseConfig"); eglTerminate(display); return s;
-    }
-    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
-    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
-    if (context == EGL_NO_CONTEXT) { set_err(&s, "v10 bare eglCreateContext"); eglTerminate(display); return s; }
+    LOGI("variant10 bare: init+terminate on display %p (no context, no surface, no makeCurrent)",
+         (void*)display);
 
-    LOGI("variant10 bare: created+destroying ctx %p on display %p (no surface, no makeCurrent)",
-         (void*)context, (void*)display);
-
-    eglDestroyContext(display, context);
     eglTerminate(display);
     s.success = 1;
     return s;
