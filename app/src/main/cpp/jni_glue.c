@@ -57,6 +57,48 @@ Java_com_example_swsrepro_ReproNative_runVariant2(JNIEnv* env, jclass clazz, jby
     return summary;
 }
 
+// Helper: runs a variant that writes into a malloc'd buffer, then copies into out_pixels.
+typedef ReproStatus (*VariantFn)(uint8_t* pixels, int width, int height);
+
+static jstring run_bytearray_variant(JNIEnv* env, jbyteArray out_pixels, VariantFn fn) {
+    jsize len = (*env)->GetArrayLength(env, out_pixels);
+    if (len < SWSREPRO_WIDTH * SWSREPRO_HEIGHT * 4) {
+        ReproStatus s = {0, "out_pixels too small"};
+        return make_summary(env, &s, NULL, 0, 0);
+    }
+    uint8_t* pixels = malloc(SWSREPRO_WIDTH * SWSREPRO_HEIGHT * 4);
+    if (!pixels) { ReproStatus s = {0, "malloc failed"}; return make_summary(env, &s, NULL, 0, 0); }
+
+    ReproStatus s = fn(pixels, SWSREPRO_WIDTH, SWSREPRO_HEIGHT);
+
+    if (s.success) {
+        (*env)->SetByteArrayRegion(env, out_pixels, 0,
+                                    SWSREPRO_WIDTH * SWSREPRO_HEIGHT * 4,
+                                    (const jbyte*)pixels);
+    }
+    jstring summary = make_summary(env, &s, pixels, SWSREPRO_WIDTH, SWSREPRO_HEIGHT);
+    free(pixels);
+    return summary;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant4(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    return run_bytearray_variant(env, out_pixels, repro_variant4_shader_fullscreen_quad);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant5(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    return run_bytearray_variant(env, out_pixels, repro_variant5_msaa_resolve);
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_example_swsrepro_ReproNative_runVariant6(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
+    (void)clazz;
+    return run_bytearray_variant(env, out_pixels, repro_variant6_srgb_framebuffer);
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_example_swsrepro_ReproNative_runVariant3(JNIEnv* env, jclass clazz, jobject bitmap) {
     (void)clazz;

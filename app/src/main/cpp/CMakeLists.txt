@@ -10,7 +10,7 @@ target_link_libraries(swsrepro
     android
     log
     EGL
-    GLESv2
+    GLESv3
     jnigraphics
 )
 

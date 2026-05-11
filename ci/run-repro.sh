@@ -35,8 +35,14 @@ adb logcat -d \
   | tee "$OUT_DIR/swsrepro-logcat.txt" \
   || true
 
-echo "=== pull PNGs ==="
-adb pull "/storage/emulated/0/Android/data/$PKG/files" "$OUT_DIR/pngs" || echo "no PNGs to pull"
+echo "=== device-side file listing ==="
+adb shell "ls -la /storage/emulated/0/Android/data/$PKG/files/ 2>&1 || echo 'no files dir'"
 
-ls -la "$OUT_DIR" || true
-ls -la "$OUT_DIR/pngs" || true
+echo "=== pull PNGs ==="
+ABS_OUT="$(pwd)/$OUT_DIR/pngs"
+mkdir -p "$ABS_OUT"
+adb pull "/storage/emulated/0/Android/data/$PKG/files/." "$ABS_OUT" || echo "no PNGs to pull"
+
+echo "=== artifacts contents ==="
+echo "cwd=$(pwd)"
+ls -laR "$OUT_DIR" || true

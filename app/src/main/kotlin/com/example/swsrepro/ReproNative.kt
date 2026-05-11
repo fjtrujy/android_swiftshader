@@ -20,6 +20,15 @@ object ReproNative {
      */
     @JvmStatic external fun runVariant3(bitmap: Bitmap): String
 
+    /** Variant 4: shader-rasterized fullscreen quad, opaque green. */
+    @JvmStatic external fun runVariant4(outPixels: ByteArray): String
+
+    /** Variant 5: MSAA RGBA8 renderbuffer -> glBlitFramebuffer resolve -> readback. */
+    @JvmStatic external fun runVariant5(outPixels: ByteArray): String
+
+    /** Variant 6: GL_SRGB8_ALPHA8 color texture FBO + clear + readback. */
+    @JvmStatic external fun runVariant6(outPixels: ByteArray): String
+
     data class Summary(
         val success: Boolean,
         val error: String,

@@ -25,4 +25,22 @@ ReproStatus repro_variant2_fbo_clear_readpixels(uint8_t* pixels, int width, int 
 // The caller is responsible for locking/unlocking the AndroidBitmap.
 ReproStatus repro_variant3_fbo_clear_readpixels_into_bitmap(uint8_t* mapped_pixels, int width, int height);
 
+// Variant 4: shader-based draw. Clear FBO to opaque BLACK, then rasterize a full-viewport
+// quad whose fragment shader emits opaque GREEN. Tests shader compilation + linking + draw.
+// Expected: every pixel == (0, 255, 0, 255).
+ReproStatus repro_variant4_shader_fullscreen_quad(uint8_t* pixels, int width, int height);
+
+// Variant 5: MSAA-resolve path. Allocate an MSAA renderbuffer (RGBA8, 4 samples), use it as
+// the color attachment of FBO_A. Clear to opaque RED. Resolve to a single-sample texture-FBO_B
+// via glBlitFramebuffer. Read FBO_B back.
+// Expected: every pixel == (255, 0, 0, 255).
+// Requires GLES3 (glRenderbufferStorageMultisample + glBlitFramebuffer).
+ReproStatus repro_variant5_msaa_resolve(uint8_t* pixels, int width, int height);
+
+// Variant 6: sRGB color attachment. RGBA8 texture but with GL_SRGB8_ALPHA8 internal format.
+// Clear to opaque RED. Read back.
+// Expected: every pixel == (255, 0, 0, 255) (sRGB encoding of 1.0 is still 1.0).
+// Requires GLES3.
+ReproStatus repro_variant6_srgb_framebuffer(uint8_t* pixels, int width, int height);
+
 #endif
