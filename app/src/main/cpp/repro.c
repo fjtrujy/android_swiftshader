@@ -87,17 +87,11 @@ static const char* FS_TEXTURED_QUAD_SRC =
 
 // ---------------------------------------------------------------------------
 // Phase 1: variant10 — preamble.
-// Bisect step: minimal off-thread EGL init + makeCurrent + teardown. No GL
-// work at all. If the bug still reproduces, the preamble's "load-bearing"
-// effect is just "a secondary EGL display/context lifecycle on a worker
-// thread". The output pixels are filled with a sentinel so success=1.
+// Bisect step: bare EGL init + makeCurrent + teardown on the MAIN thread
+// (no pthread). Confirmed earlier that the bug reproduces with the same
+// sequence on a worker thread; this run tests whether the off-thread
+// aspect matters at all.
 // ---------------------------------------------------------------------------
-
-struct V10ThreadArgs {
-    int width;
-    int height;
-    ReproStatus result;
-};
 
 static ReproStatus v10_bare_egl(void) {
     ReproStatus s = {0};
@@ -144,24 +138,12 @@ static ReproStatus v10_bare_egl(void) {
     return s;
 }
 
-static void* v10_offthread_worker(void* arg) {
-    struct V10ThreadArgs* t = (struct V10ThreadArgs*)arg;
-    t->result = v10_bare_egl();
-    return NULL;
-}
-
 ReproStatus repro_variant10_offthread_gl(uint8_t* pixels, int width, int height) {
-    LOGI("variant10 (preamble): off-thread bare-EGL init+teardown (%dx%d)", width, height);
+    LOGI("variant10 (preamble): main-thread bare-EGL init+teardown (%dx%d)", width, height);
     // Sentinel-fill the pixel buffer so the Kotlin side can still parse a
-    // valid summary. The preamble no longer draws.
+    // valid summary. The preamble does no GL work.
     memset(pixels, 0, (size_t)width * (size_t)height * 4);
-    struct V10ThreadArgs args = { .width = width, .height = height };
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, v10_offthread_worker, &args) != 0) {
-        ReproStatus s; set_err(&s, "variant10 pthread_create failed"); return s;
-    }
-    pthread_join(thread, NULL);
-    return args.result;
+    return v10_bare_egl();
 }
 
 // ---------------------------------------------------------------------------
