@@ -1,49 +1,71 @@
 # SwiftShader Android emulator render bug — minimal repro
 
-This repository is a minimal Android NDK reproducer for a render bug in
-**SwiftShader 4.0.0.1**, as used by the Android emulator's OpenGL ES
+This repository is a minimal Android NDK reproducer for two spec violations
+in **SwiftShader 4.0.0.1**, as used by the Android emulator's OpenGL ES
 Translator (`-gpu swiftshader`). It builds a tiny APK that runs a single
 GL operation in `onCreate` and writes a PNG of the result.
 
 ## TL;DR
 
-`glMapBufferRange` on `GL_PIXEL_UNPACK_BUFFER` with
-`GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT` is broken on SwiftShader's
-Android GLES translator. Writes through the mapped pointer don't reach the
-buffer's backing store. The following sequence:
+The following sequence:
 
 ```c
-GLuint pbo;
-glGenBuffers(1, &pbo);
-glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
-glBufferData(GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, GL_STREAM_DRAW);
-
-void* mapped = glMapBufferRange(
-    GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
-    GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT);
-memcpy(mapped, redPixels, byteSize);          // fill PBO with red
-glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-
+GLuint src_tex;
+glGenTextures(1, &src_tex);
+glBindTexture(GL_TEXTURE_2D, src_tex);
+glTexStorage2D(GL_TEXTURE_2D, 1 /* one level */, GL_RGBA8, w, h);
 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
-                GL_RGBA, GL_UNSIGNED_BYTE,
-                (const void*)0);              // upload from PBO offset 0
+                GL_RGBA, GL_UNSIGNED_BYTE, redPixels);
+// NO glTexParameteri call — default min filter is GL_NEAREST_MIPMAP_LINEAR.
+// Then bind src_tex, draw a textured quad into an FBO, glReadPixels.
 ```
 
-…uploads zeros to the texture, even though `mapped` was filled with red.
+samples `(0, 0, 0, 0)` everywhere on `-gpu swiftshader`. Per GLES3 §8.17
+the texture is *complete* (immutable textures always are), so this should
+sample the red pixels back. `-gpu swangle` (ANGLE → Vulkan →
+SwiftShader-Vulkan) returns the expected red.
+
+There are actually two spec violations stacked here, both confirmed by
+follow-up tests on this branch:
+
+1. **glTexStorage2D-created textures are treated as incomplete when the
+   min filter is mipmap-aware.** Per GLES3 §8.17:
+   > A texture is "complete" […] if the texture was made immutable via a
+   > call to TexStorage*, the texture is considered complete.
+   SwiftShader instead applies the regular mip-level-count check
+   (`GL_NEAREST_MIPMAP_LINEAR` needs all levels present, only 1 is
+   allocated → incomplete).
+2. **Sampling an incomplete texture returns `(0, 0, 0, 0)` instead of
+   `(0, 0, 0, 1)`.** GLES3 §8.17:
+   > […] the value `(0, 0, 0, 1)` for floating-point texture types, or
+   > `(0, 0, 0, 0xFFFFFFFF)` for integer texture types, is returned.
+   SwiftShader returns alpha = 0.
+
+Either bug alone would be a small, easy-to-work-around quirk. Stacked,
+they silently drop pixel data: a textured-quad pipeline that uses
+`GL_ONE, GL_ONE_MINUS_SRC_ALPHA` blending against a `(0, 0, 0, 0)`
+destination ends up with `(0, 0, 0, 0)` instead of the spec-correct
+`(0, 0, 0, 1)` opaque black — which is how this surfaced in real-world
+code (everything we tried to upload became transparent black).
 
 ## Symptom
 
-The repro draws a textured quad from a 256×256 RGBA8 source texture into a
-512×512 RGBA8 destination FBO, then `glReadPixels` back to compare:
+| Variant                                                                    | swiftshader        | swangle (ANGLE)    |
+|----------------------------------------------------------------------------|--------------------|--------------------|
+| `glTexStorage2D` + 1 level + default mipmap min filter (this repro)        | `(0, 0, 0, 0)` ❌  | `(255, 0, 0, 255)` ✅ |
+| `glTexStorage2D` + 1 level + `glTexParameteri(..., GL_NEAREST)`            | `(255, 0, 0, 255)` ✅ | `(255, 0, 0, 255)` ✅ |
+| `glTexImage2D` (mutable) + 1 level + default mipmap min filter             | `(0, 0, 0, 0)` ❌  | `(0, 0, 0, 255)` ⚠️ (spec) |
+| `glTexImage2D` (mutable) + 1 level + `glTexParameteri(..., GL_NEAREST)`    | `(255, 0, 0, 255)` ✅ | `(255, 0, 0, 255)` ✅ |
 
-| GPU backend                                   | center pixel       | corner pixel       |
-|-----------------------------------------------|--------------------|--------------------|
-| `-gpu swiftshader` (this bug)                 | `(0, 0, 0, 0)`     | `(0, 0, 0, 0)`     |
-| `-gpu swangle` (ANGLE → Vulkan → SwiftShader) | `(255, 0, 0, 255)` | `(255, 0, 0, 255)` |
+Row 1 demonstrates **violation 1**: `glTexStorage2D` immutable texture
+should always be complete; swiftshader treats it as incomplete and
+samples zero (further showing **violation 2**: alpha should be 1).
+Row 3 demonstrates **violation 2** in isolation: the texture is genuinely
+incomplete in both implementations, but only swangle returns the
+spec-correct `(0, 0, 0, 1)`.
 
-`swangle` goes through ANGLE → Vulkan → SwiftShader-Vulkan and produces the
-expected red output, so the bug is specifically in SwiftShader's direct GLES
-translator path.
+The blend then turns swiftshader's `(0,0,0,0)` into `(0,0,0,0)` on the
+output FBO, vs swangle's `(0,0,0,1)` which blends to opaque black.
 
 ## Versions tested
 
@@ -57,77 +79,6 @@ translator path.
 | Compile / target SDK  | 35                                          |
 | Host                  | GitHub Actions `ubuntu-22.04` runners, KVM  |
 
-## What we narrowed (and what we ruled out)
-
-Bisection on the `bisect-padding-size` branch (one CI run per row, swiftshader
-center pixel reported):
-
-| Configuration                                                                                              | swiftshader |
-|------------------------------------------------------------------------------------------------------------|-------------|
-| Original failing case: `glMapBufferRange(WRITE \| INVALIDATE_BUFFER)` + memcpy + unmap + `glTexSubImage2D` | ❌ zeros    |
-| Same path with `WRITE` only (no INVALIDATE)                                                                | ✅ red      |
-| Same path with `WRITE \| INVALIDATE_RANGE_BIT` instead of `INVALIDATE_BUFFER_BIT`                          | ✅ red      |
-| PBO upload via `glBufferSubData` (no map/unmap)                                                            | ✅ red      |
-| Direct `glTexImage2D` from CPU pointer (no PBO at all)                                                     | ✅ red      |
-| Worker pthread + shared context + glFenceSync (original renderer pattern)                                  | ❌ zeros    |
-| Single main-thread context (no worker, no shared context, no fence)                                        | ❌ zeros    |
-
-Everything outside the broken-flag combination renders the expected red. So
-the trigger is exactly the `WRITE_BIT | INVALIDATE_BUFFER_BIT` combination on
-a `GL_PIXEL_UNPACK_BUFFER`.
-
-Things we initially suspected and ruled out:
-
-- **Cross-thread / shared-context texture sharing.** The original
-  reproducer (extracted from a real renderer) ran the upload on a worker
-  thread with `eglCreateContext(... share_context = main)`,
-  `glFenceSync` + `glFlush` on the worker, and `glWaitSync` on the main
-  thread. We collapsed that to a single main-thread context and the bug
-  still reproduces. Cross-thread sharing isn't the trigger.
-- **A "preamble" pattern.** Earlier hypothesis: that a prior off-thread
-  EGL/GLES session in the same process puts SwiftShader into a bad state.
-  Bisected through every stage (off-thread → main-thread; full GL → bare
-  EGL; init+terminate → just `eglGetDisplay`; finally no preamble at all).
-  Phase 2 alone reproduces the bug, so the preamble was never load-bearing.
-- **Library size / binary layout.** Earlier hypothesis: that the bug
-  needed a certain code size in `libswsrepro.so`. Bisected by stubbing /
-  removing all unused variant code. The bug still reproduces with the
-  minimal binary (~21 KB stripped x86_64). Not a layout-sensitivity bug.
-
-## Working theory
-
-`glMapBufferRange` with `GL_MAP_INVALIDATE_BUFFER_BIT` is allowed to skip
-reading the existing buffer contents (and possibly return scratch storage),
-on the understanding that the caller will overwrite the whole buffer. The
-result of writing through the returned pointer must end up in the buffer
-on `glUnmapBuffer`.
-
-SwiftShader's translator appears to either (a) hand back a pointer that
-isn't actually the buffer's storage when this flag is set, and not commit
-the writes on `glUnmapBuffer`, or (b) skip the `glUnmapBuffer` commit
-entirely under this flag. Either way, the subsequent
-`glTexSubImage2D(... (const void*)0)` reads from the PBO before any data
-has actually landed, so the texture gets zeros.
-
-`GL_MAP_INVALIDATE_RANGE_BIT` (which only invalidates the mapped range,
-not the whole buffer) does not hit the same bug. `glBufferSubData` also
-does not hit it.
-
-Source files of interest in this repo:
-
-- [`app/src/main/cpp/repro.c`](app/src/main/cpp/repro.c) — the actual
-  trigger sequence; see the `// The trigger:` comment.
-- [`app/src/main/cpp/jni_glue.c`](app/src/main/cpp/jni_glue.c) — the
-  single JNI entry point.
-- [`app/src/main/kotlin/com/example/swsrepro/MainActivity.kt`](app/src/main/kotlin/com/example/swsrepro/MainActivity.kt)
-  — calls `ReproNative.runTest` from `Activity.onCreate`, writes the
-  result PNG to `cacheDir`.
-- [`ci/run-repro.sh`](ci/run-repro.sh) — drives the APK on a booted
-  emulator, captures logcat + the result PNG.
-- [`.github/workflows/repro.yml`](.github/workflows/repro.yml) — runs
-  the build + emulator-run matrix on GHA for both `swiftshader` and
-  `swangle`.
-
 ## Reproducing locally
 
 ```sh
@@ -138,4 +89,19 @@ APK_PATH=app/build/outputs/apk/debug/app-debug.apk ./ci/run-repro.sh
 ```
 
 Or push a branch — `.github/workflows/repro.yml` runs the build + emulator
-matrix automatically. CI artifacts include the PNGs for both backends.
+matrix automatically for both `swiftshader` and `swangle`. CI artifacts
+include the PNGs.
+
+## Source
+
+- [`app/src/main/cpp/repro.c`](app/src/main/cpp/repro.c) — the actual
+  trigger sequence; ~300 lines including EGL bring-up + the textured-quad
+  draw + readback.
+- [`app/src/main/cpp/jni_glue.c`](app/src/main/cpp/jni_glue.c) — single
+  JNI entry point.
+- [`app/src/main/kotlin/com/example/swsrepro/MainActivity.kt`](app/src/main/kotlin/com/example/swsrepro/MainActivity.kt)
+  — calls `ReproNative.runTest` from `Activity.onCreate`, writes the
+  result PNG to `cacheDir`.
+- [`.github/workflows/repro.yml`](.github/workflows/repro.yml) — runs
+  the build + emulator-run matrix on GHA for both `swiftshader` and
+  `swangle`.

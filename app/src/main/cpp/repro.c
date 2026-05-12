@@ -1,33 +1,28 @@
 // The SwiftShader Android-emulator render bug — minimal repro.
 //
-// One JNI entry point invoked from Kotlin (`repro_run_test`) does the entire
-// trigger sequence in a fresh process:
-//   - Bring up GLES3 + 1x1 pbuffer (all on main thread).
-//   - Allocate a 256x256 RGBA8 source texture (glTexStorage2D).
-//   - Upload opaque red via a GL_PIXEL_UNPACK_BUFFER using glMapBufferRange
-//     with `GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT`, memcpy red into
-//     the mapped pointer, glUnmapBuffer, then glTexSubImage2D from PBO
-//     offset 0.
-//   - Bind a 512x512 RGBA8 destination FBO; draw a full-NDC quad sampling
-//     the source texture; glReadPixels.
+// One JNI entry point invoked from Kotlin (`repro_run_test`):
+//   - Bring up GLES3 + 1x1 pbuffer (main thread).
+//   - Allocate a 256x256 RGBA8 IMMUTABLE source texture via glTexStorage2D
+//     with 1 mipmap level. Upload opaque red via glTexSubImage2D from a
+//     CPU buffer. Do NOT call glTexParameteri — leave the default min
+//     filter (GL_NEAREST_MIPMAP_LINEAR).
+//   - Bind a 512x512 RGBA8 destination FBO; sample the source texture
+//     in a textured-quad shader; glReadPixels.
 //
-// Expected output: every pixel `(255, 0, 0, 255)`.
-// On the Android emulator with `-gpu swiftshader`: every pixel `(0, 0, 0, 0)`.
-// On `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan): correct red.
+// Expected output (GLES3 spec section 8.17 — immutable textures are always
+// complete): every pixel `(255, 0, 0, 255)`.
 //
-// The bisection on this branch isolated the trigger to a single map flag:
-//   - WRITE_BIT alone                       → ✅ red
-//   - WRITE_BIT | INVALIDATE_BUFFER_BIT     → ❌ zeros (THIS)
-//   - WRITE_BIT | INVALIDATE_RANGE_BIT      → ✅ red
-//   - glBufferSubData (no map/unmap)        → ✅ red
-//   - direct glTexImage2D from CPU pointer  → ✅ red
+// Actual output:
+//   - `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan): (255, 0, 0, 255).
+//   - `-gpu swiftshader`: (0, 0, 0, 0). SwiftShader's GLES translator
+//     treats this immutable, 1-level texture as INCOMPLETE because the
+//     default min filter is mipmap-aware. It also returns transparent
+//     black (alpha=0) for incomplete sampling — the spec requires
+//     (0, 0, 0, 1) for floating-point textures.
 //
-// Conclusion: SwiftShader 4.0.0.1 in the Android emulator's GLES translator
-// mishandles glMapBufferRange on GL_PIXEL_UNPACK_BUFFER when
-// GL_MAP_INVALIDATE_BUFFER_BIT is set. The bytes written through the mapped
-// pointer never reach the buffer's backing store before glUnmapBuffer +
-// glTexSubImage2D from PBO offset 0 read it, so the texture ends up filled
-// with zeros and subsequent sampling produces transparent black.
+// Workaround on the client side: call
+//   `glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)`
+// (or any non-mipmap-aware min filter) after creating the texture.
 
 #include "repro.h"
 
@@ -42,12 +37,6 @@
 
 #define LOG_TAG "swsrepro"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
-
-// PBO constants — not exposed by the NDK GLES headers we link against.
-#define V_GL_PIXEL_UNPACK_BUFFER       0x88EC
-#define V_GL_STREAM_DRAW               0x88E0
-#define V_GL_MAP_WRITE_BIT             0x0002
-#define V_GL_MAP_INVALIDATE_BUFFER_BIT 0x0008
 
 #define SOURCE_SIZE  256
 #define TARGET_W     512
@@ -153,15 +142,17 @@ static ReproStatus run_test(uint8_t* pixels) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // Source texture: 256x256 RGBA8. MUTABLE storage via glTexImage2D from a
-    // malloc'd CPU buffer (NO glTexStorage2D, NO PBO). Default min filter is
-    // GL_NEAREST_MIPMAP_LINEAR. Bisect step: with 1 mipmap level and a
-    // mipmap-aware min filter, a mutable texture is technically INCOMPLETE
-    // per the GLES3 spec — so swangle and swiftshader should both return
-    // (0,0,0,0) on sample. This tests where each implementation actually
-    // draws the completeness line.
+    // Source texture: 256x256 RGBA8, IMMUTABLE storage via glTexStorage2D
+    // with 1 mipmap level, uploaded via glTexSubImage2D from a CPU buffer.
+    // NO glTexParameteri call — default min filter is GL_NEAREST_MIPMAP_LINEAR.
+    //
+    // Per GLES3 spec section 8.17, immutable textures (those created with
+    // glTexStorage*) are always complete regardless of the mipmap filter,
+    // so sampling this texture should return red. swangle does. SwiftShader
+    // returns (0, 0, 0, 0).
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
     {
         size_t byteSize = (size_t)SOURCE_SIZE * (size_t)SOURCE_SIZE * 4;
         uint8_t* cpu = (uint8_t*)malloc(byteSize);
@@ -169,11 +160,10 @@ static ReproStatus run_test(uint8_t* pixels) {
         for (size_t i = 0; i < byteSize; i += 4) {
             cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
         }
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SOURCE_SIZE, SOURCE_SIZE, 0,
-                     GL_RGBA, GL_UNSIGNED_BYTE, cpu);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
+                        GL_RGBA, GL_UNSIGNED_BYTE, cpu);
         free(cpu);
     }
-    // Deliberately NO glTexParameteri here. Default min filter is mipmap-aware.
 
     glGenTextures(1, &dst_tex);
     glBindTexture(GL_TEXTURE_2D, dst_tex);
@@ -250,6 +240,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: glTexImage2D (mutable, 1 level) + default mipmap min filter");
+    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D, default mipmap min filter");
     return run_test(pixels);
 }
