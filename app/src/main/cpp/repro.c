@@ -185,8 +185,11 @@ static ReproStatus run_test(uint8_t* pixels) {
         glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
         glDeleteBuffers(1, &pbo);
     }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    // Deliberately NO glTexParameteri here. With glTexStorage2D + 1 level,
+    // the default min filter (GL_NEAREST_MIPMAP_LINEAR) should still sample
+    // correctly per the GLES3 spec (immutable textures are always complete).
+    // If swiftshader returns zeros here, the bug is texture-completeness
+    // handling, not the PBO upload.
 
     glGenTextures(1, &dst_tex);
     glBindTexture(GL_TEXTURE_2D, dst_tex);
@@ -263,6 +266,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: PBO map/unmap (WRITE | INVALIDATE_BUFFER) + glTexSubImage2D from PBO");
+    LOGI("repro_run_test: PBO + INVALIDATE_BUFFER + glTexSubImage2D, NO filter params (default NEAREST_MIPMAP_LINEAR)");
     return run_test(pixels);
 }
