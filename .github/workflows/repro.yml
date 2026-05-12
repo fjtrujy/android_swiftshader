@@ -59,6 +59,19 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK 28.2.13676358
+        run: sdkmanager "ndk;28.2.13676358"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', 'gradle/libs.versions.toml') }}
+
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
@@ -93,7 +106,7 @@ jobs:
           disable-animations: true
           script: echo "AVD created"
 
-      - name: Run repro app
+      - name: Run repro app (captures PNG + logcat)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -103,6 +116,30 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -no-audio -no-boot-anim -gpu ${{ matrix.gpu }}
           disable-animations: true
           script: bash ci/run-repro.sh
+
+      # Hard pass/fail signal:
+      #   - swangle:    test passes (green).
+      #   - swiftshader: test fails (red) — that IS the bug demonstration.
+      # `continue-on-error: true` so the swiftshader job still uploads its
+      # artifacts after the deliberate failure.
+      - name: Run instrumented test
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -no-audio -no-boot-anim -gpu ${{ matrix.gpu }}
+          disable-animations: true
+          script: ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
+
+      - name: Collect test reports
+        if: always()
+        run: |
+          mkdir -p artifacts/androidTest-reports
+          cp -r app/build/reports/androidTests/connected/. artifacts/androidTest-reports/ 2>/dev/null || true
+          cp -r app/build/outputs/androidTest-results/connected/. artifacts/androidTest-reports/ 2>/dev/null || true
 
       - name: Upload artifacts
         if: always()

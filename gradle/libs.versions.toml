@@ -6,6 +6,15 @@ android-minSdk = "24"
 android-targetSdk = "35"
 android-ndk = "28.2.13676358"
 
+androidx-test-junit = "1.2.1"
+androidx-test-runner = "1.6.2"
+junit = "4.13.2"
+
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
 kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+
+[libraries]
+androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidx-test-junit" }
+androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidx-test-runner" }
+junit = { module = "junit:junit", version.ref = "junit" }
