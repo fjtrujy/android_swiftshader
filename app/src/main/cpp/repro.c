@@ -153,43 +153,27 @@ static ReproStatus run_test(uint8_t* pixels) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // Source texture: 256x256 RGBA8. glTexStorage2D + PBO upload via
-    // glMapBufferRange WITHOUT GL_MAP_INVALIDATE_BUFFER_BIT (just
-    // GL_MAP_WRITE_BIT) + memcpy + glUnmapBuffer. Bisect step.
+    // Source texture: 256x256 RGBA8. MUTABLE storage via glTexImage2D from a
+    // malloc'd CPU buffer (NO glTexStorage2D, NO PBO). Default min filter is
+    // GL_NEAREST_MIPMAP_LINEAR. Bisect step: with 1 mipmap level and a
+    // mipmap-aware min filter, a mutable texture is technically INCOMPLETE
+    // per the GLES3 spec — so swangle and swiftshader should both return
+    // (0,0,0,0) on sample. This tests where each implementation actually
+    // draws the completeness line.
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
     {
         size_t byteSize = (size_t)SOURCE_SIZE * (size_t)SOURCE_SIZE * 4;
-        GLuint pbo = 0;
-        glGenBuffers(1, &pbo);
-        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
-        glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
-        // The trigger: WRITE_BIT | INVALIDATE_BUFFER_BIT. Bisection showed
-        // replacing INVALIDATE_BUFFER_BIT with INVALIDATE_RANGE_BIT, or
-        // dropping the invalidate flag entirely, fixes the bug.
-        void* mapped = glMapBufferRange(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
-                                         V_GL_MAP_WRITE_BIT | V_GL_MAP_INVALIDATE_BUFFER_BIT);
-        if (!mapped) {
-            glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
-            glDeleteBuffers(1, &pbo);
-            set_err(&s, "main glMapBufferRange returned NULL"); goto cleanup;
-        }
-        uint8_t* m = (uint8_t*)mapped;
+        uint8_t* cpu = (uint8_t*)malloc(byteSize);
+        if (!cpu) { set_err(&s, "main malloc red buffer"); goto cleanup; }
         for (size_t i = 0; i < byteSize; i += 4) {
-            m[i+0] = 255; m[i+1] = 0; m[i+2] = 0; m[i+3] = 255;
+            cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
         }
-        glUnmapBuffer(V_GL_PIXEL_UNPACK_BUFFER);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
-                        GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)0);
-        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
-        glDeleteBuffers(1, &pbo);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SOURCE_SIZE, SOURCE_SIZE, 0,
+                     GL_RGBA, GL_UNSIGNED_BYTE, cpu);
+        free(cpu);
     }
-    // Deliberately NO glTexParameteri here. With glTexStorage2D + 1 level,
-    // the default min filter (GL_NEAREST_MIPMAP_LINEAR) should still sample
-    // correctly per the GLES3 spec (immutable textures are always complete).
-    // If swiftshader returns zeros here, the bug is texture-completeness
-    // handling, not the PBO upload.
+    // Deliberately NO glTexParameteri here. Default min filter is mipmap-aware.
 
     glGenTextures(1, &dst_tex);
     glBindTexture(GL_TEXTURE_2D, dst_tex);
@@ -266,6 +250,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: PBO + INVALIDATE_BUFFER + glTexSubImage2D, NO filter params (default NEAREST_MIPMAP_LINEAR)");
+    LOGI("repro_run_test: glTexImage2D (mutable, 1 level) + default mipmap min filter");
     return run_test(pixels);
 }
