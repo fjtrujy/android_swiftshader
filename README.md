@@ -98,6 +98,34 @@ after creating the texture. Once the min filter is non-mipmap-aware,
 the completeness check passes on swiftshader and the sample returns
 red as expected.
 
+## Where you can reproduce this
+
+The bug only appears on emulator configs that actually exercise the
+**direct SwiftShader GLES translator** — identifiable by
+`GL_RENDERER = "Android Emulator OpenGL ES Translator (Google SwiftShader)"`.
+Some host platforms silently alias `-gpu swiftshader` to the ANGLE path,
+in which case the broken codepath is never reached and the bug is
+invisible.
+
+| Host                       | API  | `-gpu` flag    | Actual `GL_RENDERER`                                         | Result   |
+|----------------------------|------|----------------|--------------------------------------------------------------|----------|
+| ubuntu x86_64 (GHA runner) | 35   | `swiftshader`  | `... (Google SwiftShader)`                                   | ❌ fails |
+| ubuntu x86_64 (GHA runner) | 36   | `swiftshader`  | `... (Google SwiftShader)`                                   | ❌ fails |
+| ubuntu x86_64 (GHA runner) | 35   | `swangle`      | `... (ANGLE ... SwiftShader Device (Subzero) ...)`           | ✅ passes |
+| macOS aarch64 (local)      | 36.1 | `swiftshader`  | `... (ANGLE ... SwiftShader Device (LLVM 10.0.0) ...)` (aliased) | ✅ passes |
+
+If you're on an Apple Silicon Mac and the test passes for you with
+`-gpu swiftshader`, check the renderer string in logcat — the emulator
+has likely substituted ANGLE for SwiftShader, so you're not actually
+exercising the broken path. To force the broken path you'd need an
+x86_64 host (Linux, Windows, or Intel macOS).
+
+(We tried `macos-13` and `macos-14` GHA runners as part of CI to catch
+the host-arch variation automatically, but GHA's macOS runners do not
+expose reliable nested virtualization for the Android emulator and the
+emulator boot hangs. The table above is from manual reproductions plus
+the Linux matrix that runs on every push.)
+
 ## Reproducing
 
 ### As an instrumented test (hard pass/fail)
