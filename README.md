@@ -63,23 +63,34 @@ incomplete-sample value it returns is also wrong. So a pipeline that
 blends against a `(0, 0, 0, 0)` destination ends up dropping the pixel
 entirely instead of producing opaque black.
 
-## Where the bug likely lives in SwiftShader
+## Which layer the bug lives in
 
-I haven't read the source, but the symptom points at two specific
-places:
+The `GL_RENDERER` string `"Android Emulator OpenGL ES Translator (Google SwiftShader)"`
+describes a two-layer stack:
 
-1. The **immutable-texture short-circuit in the completeness check**
-   appears to be missing or unreached. The texture object presumably
-   has an `immutable` / `isImmutable` flag set by `glTexStorage2D`; the
-   completeness predicate should test it before falling through to the
-   per-level checks.
-2. The **incomplete-texture sentinel** appears to be a hard-coded
-   `(0, 0, 0, 0)` (e.g. a zero-init `vec4` or a memset'd byte buffer)
-   rather than the spec-required type-dependent value:
-   `(0, 0, 0, 1)` for floating-point sampled types,
-   `(0, 0, 0, 0xFFFFFFFF)` for integer ones.
+1. **Android emulator's GLES Translator** (`emugl`, in AOSP under
+   `external/qemu`) — receives GLES calls from the guest OS and
+   forwards them to a host-side backend.
+2. **SwiftShader's libGLESv2** — SwiftShader's own self-contained
+   GLES 3.0 implementation. emugl forwards to this when
+   `-gpu swiftshader` is selected.
 
-Fixing either one alone would already unbreak this repo's repro.
+From outside we can't tell which layer originates which violation:
+
+- **Violation 2** (incomplete-sample returns `(0, 0, 0, 0)` instead of
+  `(0, 0, 0, 1)`) almost certainly lives in SwiftShader's libGLESv2 —
+  the sample value is produced by the rasterizer/sampler, which is
+  SwiftShader's code, not emugl's.
+
+- **Violation 1** (immutable texture treated as incomplete) could be in
+  either layer:
+  - emugl might be marshalling `glTexStorage2D` into a sequence of
+    `glTexImage2D` calls before forwarding, losing the immutable flag
+    in the process.
+  - Or emugl forwards faithfully and SwiftShader's completeness check
+    is missing the `if (immutable) return COMPLETE;` short-circuit.
+
+Either fix alone would unbreak the repro.
 
 ## Effect on real applications
 
