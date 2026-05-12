@@ -1,18 +1,33 @@
 // The SwiftShader Android-emulator render bug — minimal repro.
 //
 // One JNI entry point invoked from Kotlin (`repro_run_test`) does the entire
-// trigger sequence in a fresh process. Bisect step: drop the PBO upload path
-// — upload the source texture via DIRECT glTexImage2D from a CPU buffer.
+// trigger sequence in a fresh process:
 //   - Bring up GLES3 + 1x1 pbuffer (all on main thread).
-//   - Allocate a 256x256 RGBA8 source texture; glTexImage2D directly from a
-//     malloc'd CPU buffer pre-filled with opaque red.
+//   - Allocate a 256x256 RGBA8 source texture (glTexStorage2D).
+//   - Upload opaque red via a GL_PIXEL_UNPACK_BUFFER using glMapBufferRange
+//     with `GL_MAP_WRITE_BIT | GL_MAP_INVALIDATE_BUFFER_BIT`, memcpy red into
+//     the mapped pointer, glUnmapBuffer, then glTexSubImage2D from PBO
+//     offset 0.
 //   - Bind a 512x512 RGBA8 destination FBO; draw a full-NDC quad sampling
 //     the source texture; glReadPixels.
 //
 // Expected output: every pixel `(255, 0, 0, 255)`.
-// If swiftshader still gives `(0, 0, 0, 0)`, the bug is in the sample/draw
-// path itself, not the upload. If swiftshader now gives red, PBO upload is
-// the trigger.
+// On the Android emulator with `-gpu swiftshader`: every pixel `(0, 0, 0, 0)`.
+// On `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan): correct red.
+//
+// The bisection on this branch isolated the trigger to a single map flag:
+//   - WRITE_BIT alone                       → ✅ red
+//   - WRITE_BIT | INVALIDATE_BUFFER_BIT     → ❌ zeros (THIS)
+//   - WRITE_BIT | INVALIDATE_RANGE_BIT      → ✅ red
+//   - glBufferSubData (no map/unmap)        → ✅ red
+//   - direct glTexImage2D from CPU pointer  → ✅ red
+//
+// Conclusion: SwiftShader 4.0.0.1 in the Android emulator's GLES translator
+// mishandles glMapBufferRange on GL_PIXEL_UNPACK_BUFFER when
+// GL_MAP_INVALIDATE_BUFFER_BIT is set. The bytes written through the mapped
+// pointer never reach the buffer's backing store before glUnmapBuffer +
+// glTexSubImage2D from PBO offset 0 read it, so the texture ends up filled
+// with zeros and subsequent sampling produces transparent black.
 
 #include "repro.h"
 
@@ -32,7 +47,7 @@
 #define V_GL_PIXEL_UNPACK_BUFFER       0x88EC
 #define V_GL_STREAM_DRAW               0x88E0
 #define V_GL_MAP_WRITE_BIT             0x0002
-#define V_GL_MAP_INVALIDATE_RANGE_BIT  0x0004
+#define V_GL_MAP_INVALIDATE_BUFFER_BIT 0x0008
 
 #define SOURCE_SIZE  256
 #define TARGET_W     512
@@ -150,8 +165,11 @@ static ReproStatus run_test(uint8_t* pixels) {
         glGenBuffers(1, &pbo);
         glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
         glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
+        // The trigger: WRITE_BIT | INVALIDATE_BUFFER_BIT. Bisection showed
+        // replacing INVALIDATE_BUFFER_BIT with INVALIDATE_RANGE_BIT, or
+        // dropping the invalidate flag entirely, fixes the bug.
         void* mapped = glMapBufferRange(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
-                                         V_GL_MAP_WRITE_BIT | V_GL_MAP_INVALIDATE_RANGE_BIT);
+                                         V_GL_MAP_WRITE_BIT | V_GL_MAP_INVALIDATE_BUFFER_BIT);
         if (!mapped) {
             glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
             glDeleteBuffers(1, &pbo);
@@ -245,6 +263,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: single-thread PBO map/unmap (WRITE | INVALIDATE_RANGE) + glTexSubImage2D");
+    LOGI("repro_run_test: PBO map/unmap (WRITE | INVALIDATE_BUFFER) + glTexSubImage2D from PBO");
     return run_test(pixels);
 }
