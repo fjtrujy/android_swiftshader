@@ -118,16 +118,19 @@ jobs:
           script: bash ci/run-repro.sh
 
       # Hard pass/fail signal:
-      #   - swangle:    test passes (green).
-      #   - swiftshader: test fails (red) — that IS the bug demonstration.
-      # `continue-on-error: true` so the swiftshader job still uploads its
-      # artifacts after the deliberate failure.
+      #   - swangle:    test passes → job + workflow stay green.
+      #   - swiftshader: test fails → job + workflow go RED. That is the
+      #                  bug demonstration; a green swiftshader run would
+      #                  mean the upstream fix landed (or this repro broke).
+      #
+      # Test reports and PNG artifacts still upload — see `if: always()`
+      # on the later steps. Do NOT add `continue-on-error: true` here:
+      # it hides the failure at the job/workflow level.
       #
       # The previous step installed the APK from the build job (different
       # debug keystore than the local Gradle build). Uninstall before the
       # test step so Gradle can install its own freshly-built APK.
       - name: Run instrumented test
-        continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
