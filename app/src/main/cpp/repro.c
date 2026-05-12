@@ -1,28 +1,33 @@
-// The SwiftShader Android-emulator render bug — minimal repro.
+// SwiftShader Android-emulator render bug — minimal repro.
 //
-// One JNI entry point invoked from Kotlin (`repro_run_test`):
-//   - Bring up GLES3 + 1x1 pbuffer (main thread).
-//   - Allocate a 256x256 RGBA8 IMMUTABLE source texture via glTexStorage2D
-//     with 1 mipmap level. Upload opaque red via glTexSubImage2D from a
-//     CPU buffer. Do NOT call glTexParameteri — leave the default min
-//     filter (GL_NEAREST_MIPMAP_LINEAR).
-//   - Bind a 512x512 RGBA8 destination FBO; sample the source texture
-//     in a textured-quad shader; glReadPixels.
+// Sequence (entirely on the main thread):
+//   1. Bring up GLES3 + 1x1 pbuffer surface.
+//   2. Create an IMMUTABLE 256x256 RGBA8 source texture via glTexStorage2D
+//      with 1 mipmap level. Upload opaque red via glTexSubImage2D from a
+//      CPU buffer. Do NOT call glTexParameteri — leave the default
+//      min filter (GL_NEAREST_MIPMAP_LINEAR).
+//   3. Create a 256x256 RGBA8 destination texture + FBO. Clear to a
+//      sentinel BLUE so "draw didn't run" is distinguishable from
+//      "sample returned zero".
+//   4. Compile + link a textured-quad shader; draw a fullscreen quad
+//      sampling the source texture into the FBO.
+//   5. glReadPixels back.
 //
-// Expected output (GLES3 spec section 8.17 — immutable textures are always
-// complete): every pixel `(255, 0, 0, 255)`.
+// Expected output per GLES3 spec section 8.17 (immutable textures are
+// always complete): every pixel `(255, 0, 0, 255)`.
 //
-// Actual output:
-//   - `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan): (255, 0, 0, 255).
-//   - `-gpu swiftshader`: (0, 0, 0, 0). SwiftShader's GLES translator
-//     treats this immutable, 1-level texture as INCOMPLETE because the
-//     default min filter is mipmap-aware. It also returns transparent
-//     black (alpha=0) for incomplete sampling — the spec requires
-//     (0, 0, 0, 1) for floating-point textures.
+// Actual:
+//   - `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan): red ✅.
+//   - `-gpu swiftshader`: `(0, 0, 0, 0)` ❌. Two spec violations stacked:
+//     a) SwiftShader treats the 1-level immutable texture as incomplete
+//        because the default min filter is mipmap-aware. GLES3 §8.17
+//        says immutable textures are always complete.
+//     b) Sampling an incomplete texture returns (0, 0, 0, 0). GLES3
+//        §8.17 requires (0, 0, 0, 1) for float texture types.
 //
-// Workaround on the client side: call
-//   `glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)`
-// (or any non-mipmap-aware min filter) after creating the texture.
+// Client workaround: call
+//   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+// (or any non-mipmap-aware filter) after creating the source texture.
 
 #include "repro.h"
 
@@ -36,15 +41,9 @@
 #include <android/log.h>
 
 #define LOG_TAG "swsrepro"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
-#define SOURCE_SIZE  256
-#define TARGET_W     512
-#define TARGET_H     512
-
-// ---------------------------------------------------------------------------
-// Local helpers.
-// ---------------------------------------------------------------------------
+#define SIZE 256
 
 static void set_err(ReproStatus* s, const char* msg) {
     s->success = 0;
@@ -81,11 +80,7 @@ static GLuint compile_shader(GLenum type, const char* src, ReproStatus* s) {
     return sh;
 }
 
-// ---------------------------------------------------------------------------
-// Shaders.
-// ---------------------------------------------------------------------------
-
-static const char* VS_TEXTURED_QUAD_SRC =
+static const char* VS_SRC =
     "attribute vec2 a_pos;\n"
     "attribute vec2 a_uv;\n"
     "varying vec2 v_uv;\n"
@@ -94,27 +89,23 @@ static const char* VS_TEXTURED_QUAD_SRC =
     "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
     "}\n";
 
-static const char* FS_TEXTURED_QUAD_SRC =
+static const char* FS_SRC =
     "precision mediump float;\n"
     "varying vec2 v_uv;\n"
     "uniform sampler2D u_tex;\n"
     "void main() { gl_FragColor = texture2D(u_tex, v_uv); }\n";
 
-// ---------------------------------------------------------------------------
-// Main path: bootstrap GLES3 + PBO upload + sample texture, all on the main
-// thread (no worker, no shared context). Bisect step.
-// ---------------------------------------------------------------------------
-
 static ReproStatus run_test(uint8_t* pixels) {
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;
-    EGLContext main_context = EGL_NO_CONTEXT;
-    EGLSurface main_surface = EGL_NO_SURFACE;
+    EGLContext context = EGL_NO_CONTEXT;
+    EGLSurface surface = EGL_NO_SURFACE;
     GLuint src_tex = 0, dst_tex = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
 
+    // EGL bring-up: GLES3 context + 1x1 pbuffer (drawing goes to an FBO).
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (display == EGL_NO_DISPLAY) { set_err(&s, "main eglGetDisplay"); goto cleanup; }
-    if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "main eglInitialize"); goto cleanup; }
+    if (display == EGL_NO_DISPLAY) { set_err(&s, "eglGetDisplay"); goto cleanup; }
+    if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "eglInitialize"); goto cleanup; }
 
     const EGLint cfg_attribs[] = {
         EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
@@ -125,67 +116,66 @@ static ReproStatus run_test(uint8_t* pixels) {
     EGLConfig config;
     EGLint num_configs = 0;
     if (!eglChooseConfig(display, cfg_attribs, &config, 1, &num_configs) || num_configs < 1) {
-        set_err(&s, "main eglChooseConfig"); goto cleanup;
+        set_err(&s, "eglChooseConfig"); goto cleanup;
     }
     const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
-    main_context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
-    if (main_context == EGL_NO_CONTEXT) { set_err(&s, "main eglCreateContext"); goto cleanup; }
+    context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
+    if (context == EGL_NO_CONTEXT) { set_err(&s, "eglCreateContext"); goto cleanup; }
     const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-    main_surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
-    if (main_surface == EGL_NO_SURFACE) { set_err(&s, "main pbuffer"); goto cleanup; }
-    if (!eglMakeCurrent(display, main_surface, main_surface, main_context)) {
-        set_err(&s, "main makeCurrent"); goto cleanup;
+    surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
+    if (surface == EGL_NO_SURFACE) { set_err(&s, "eglCreatePbufferSurface"); goto cleanup; }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        set_err(&s, "eglMakeCurrent"); goto cleanup;
     }
 
-    LOGI("main: GL_VENDOR='%s' GL_RENDERER='%s' GL_VERSION='%s'",
+    LOGI("GL_VENDOR='%s' GL_RENDERER='%s' GL_VERSION='%s'",
          (const char*)glGetString(GL_VENDOR),
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // Source texture: 256x256 RGBA8, IMMUTABLE storage via glTexStorage2D
-    // with 1 mipmap level, uploaded via glTexSubImage2D from a CPU buffer.
-    // NO glTexParameteri call — default min filter is GL_NEAREST_MIPMAP_LINEAR.
-    //
-    // Per GLES3 spec section 8.17, immutable textures (those created with
-    // glTexStorage*) are always complete regardless of the mipmap filter,
-    // so sampling this texture should return red. swangle does. SwiftShader
-    // returns (0, 0, 0, 0).
+    // *** THE BUG ***
+    // Immutable, single-level RGBA8 texture filled with opaque red.
+    // No glTexParameteri — default min filter is GL_NEAREST_MIPMAP_LINEAR.
+    // GLES3 §8.17 says this is complete; SwiftShader treats it as incomplete.
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SOURCE_SIZE, SOURCE_SIZE);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SIZE, SIZE);
     {
-        size_t byteSize = (size_t)SOURCE_SIZE * (size_t)SOURCE_SIZE * 4;
+        size_t byteSize = (size_t)SIZE * (size_t)SIZE * 4;
         uint8_t* cpu = (uint8_t*)malloc(byteSize);
-        if (!cpu) { set_err(&s, "main malloc red buffer"); goto cleanup; }
+        if (!cpu) { set_err(&s, "malloc red buffer"); goto cleanup; }
         for (size_t i = 0; i < byteSize; i += 4) {
             cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
         }
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SOURCE_SIZE, SOURCE_SIZE,
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIZE, SIZE,
                         GL_RGBA, GL_UNSIGNED_BYTE, cpu);
         free(cpu);
     }
+    if (!check_gl(&s, "src texture setup")) goto cleanup;
 
+    // Destination FBO. Clear to BLUE so "draw didn't run" is visually distinct
+    // from "fragment shader wrote zeros".
     glGenTextures(1, &dst_tex);
     glBindTexture(GL_TEXTURE_2D, dst_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, TARGET_W, TARGET_H, 0,
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SIZE, SIZE, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        set_err(&s, "main FBO incomplete"); goto cleanup;
+        set_err(&s, "FBO incomplete"); goto cleanup;
     }
 
-    vs = compile_shader(GL_VERTEX_SHADER, VS_TEXTURED_QUAD_SRC, &s); if (!vs) goto cleanup;
-    fs = compile_shader(GL_FRAGMENT_SHADER, FS_TEXTURED_QUAD_SRC, &s); if (!fs) goto cleanup;
+    vs = compile_shader(GL_VERTEX_SHADER, VS_SRC, &s); if (!vs) goto cleanup;
+    fs = compile_shader(GL_FRAGMENT_SHADER, FS_SRC, &s); if (!fs) goto cleanup;
     program = glCreateProgram();
     glAttachShader(program, vs);
     glAttachShader(program, fs);
     glBindAttribLocation(program, 0, "a_pos");
     glBindAttribLocation(program, 1, "a_uv");
     glLinkProgram(program);
-    GLint linked = 0; glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    GLint linked = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
     if (!linked) { set_err(&s, "link failed"); goto cleanup; }
     glUseProgram(program);
 
@@ -206,40 +196,36 @@ static ReproStatus run_test(uint8_t* pixels) {
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, src_tex);
-    GLint u_tex = glGetUniformLocation(program, "u_tex");
-    glUniform1i(u_tex, 0);
+    glUniform1i(glGetUniformLocation(program, "u_tex"), 0);
 
-    glViewport(0, 0, TARGET_W, TARGET_H);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glViewport(0, 0, SIZE, SIZE);
+    glClearColor(0.f, 0.f, 1.f, 1.f); // BLUE sentinel
     glClear(GL_COLOR_BUFFER_BIT);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glFinish();
 
-    glReadPixels(0, 0, TARGET_W, TARGET_H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glReadPixels(0, 0, SIZE, SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     if (!check_gl(&s, "readback")) goto cleanup;
     s.success = 1;
 
 cleanup:
-    if (src_tex) glDeleteTextures(1, &src_tex);
     if (vbo) glDeleteBuffers(1, &vbo);
     if (program) glDeleteProgram(program);
     if (vs) glDeleteShader(vs);
     if (fs) glDeleteShader(fs);
     if (fbo) glDeleteFramebuffers(1, &fbo);
     if (dst_tex) glDeleteTextures(1, &dst_tex);
-    if (main_surface != EGL_NO_SURFACE) {
+    if (src_tex) glDeleteTextures(1, &src_tex);
+    if (surface != EGL_NO_SURFACE) {
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroySurface(display, main_surface);
+        eglDestroySurface(display, surface);
     }
-    if (main_context != EGL_NO_CONTEXT) eglDestroyContext(display, main_context);
+    if (context != EGL_NO_CONTEXT) eglDestroyContext(display, context);
     if (display != EGL_NO_DISPLAY) eglTerminate(display);
     return s;
 }
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D, default mipmap min filter");
+    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D; default mipmap min filter");
     return run_test(pixels);
 }
