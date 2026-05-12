@@ -95,7 +95,10 @@ static const char* FS_SRC =
     "uniform sampler2D u_tex;\n"
     "void main() { gl_FragColor = texture2D(u_tex, v_uv); }\n";
 
-static ReproStatus run_test(uint8_t* pixels) {
+ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
+    (void)width; (void)height;
+    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D; default mipmap min filter");
+
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLContext context = EGL_NO_CONTEXT;
@@ -224,8 +227,3 @@ cleanup:
     return s;
 }
 
-ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
-    (void)width; (void)height;
-    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D; default mipmap min filter");
-    return run_test(pixels);
-}
