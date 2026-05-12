@@ -25,8 +25,7 @@ the texture is *complete* (immutable textures always are), so this should
 sample the red pixels back. `-gpu swangle` (ANGLE → Vulkan →
 SwiftShader-Vulkan) returns the expected red.
 
-There are actually two spec violations stacked here, both confirmed by
-follow-up tests on this branch:
+Two spec violations are stacked here:
 
 1. **glTexStorage2D-created textures are treated as incomplete when the
    min filter is mipmap-aware.** Per GLES3 §8.17:
@@ -41,12 +40,13 @@ follow-up tests on this branch:
    > `(0, 0, 0, 0xFFFFFFFF)` for integer texture types, is returned.
    SwiftShader returns alpha = 0.
 
-Either bug alone would be a small, easy-to-work-around quirk. Stacked,
-they silently drop pixel data: a textured-quad pipeline that uses
-`GL_ONE, GL_ONE_MINUS_SRC_ALPHA` blending against a `(0, 0, 0, 0)`
-destination ends up with `(0, 0, 0, 0)` instead of the spec-correct
-`(0, 0, 0, 1)` opaque black — which is how this surfaced in real-world
-code (everything we tried to upload became transparent black).
+Either alone would be an easy-to-work-around quirk. Stacked, they
+silently drop pixel data: in real-world code that uses
+`GL_ONE_MINUS_SRC_ALPHA` blending, swiftshader's `(0, 0, 0, 0)` blends
+to transparent black instead of the spec-correct `(0, 0, 0, 1)` opaque
+black — which is how this bug surfaced for us (everything we tried to
+upload through `glTexStorage2D` became transparent black on the
+emulator).
 
 ## Symptom
 
@@ -57,15 +57,17 @@ code (everything we tried to upload became transparent black).
 | `glTexImage2D` (mutable) + 1 level + default mipmap min filter             | `(0, 0, 0, 0)` ❌  | `(0, 0, 0, 255)` ⚠️ (spec) |
 | `glTexImage2D` (mutable) + 1 level + `glTexParameteri(..., GL_NEAREST)`    | `(255, 0, 0, 255)` ✅ | `(255, 0, 0, 255)` ✅ |
 
-Row 1 demonstrates **violation 1**: `glTexStorage2D` immutable texture
-should always be complete; swiftshader treats it as incomplete and
-samples zero (further showing **violation 2**: alpha should be 1).
-Row 3 demonstrates **violation 2** in isolation: the texture is genuinely
-incomplete in both implementations, but only swangle returns the
-spec-correct `(0, 0, 0, 1)`.
+Row 1 (the default repro on `main`) demonstrates **violation 1**:
+swiftshader treats a `glTexStorage2D` immutable texture as incomplete
+even though §8.17 says it should always be complete (and further shows
+**violation 2**: alpha is 0 instead of 1).
+Row 3 demonstrates **violation 2** in isolation: the texture is
+genuinely incomplete in both implementations, but only swangle returns
+the spec-correct `(0, 0, 0, 1)`.
 
-The blend then turns swiftshader's `(0,0,0,0)` into `(0,0,0,0)` on the
-output FBO, vs swangle's `(0,0,0,1)` which blends to opaque black.
+To switch between rows, edit `app/src/main/cpp/repro.c`:
+- Row 2 / 4: add `glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)` after the source texture is created.
+- Row 3 / 4: replace `glTexStorage2D` + `glTexSubImage2D` with a single `glTexImage2D` call.
 
 ## Versions tested
 
@@ -95,7 +97,7 @@ include the PNGs.
 ## Source
 
 - [`app/src/main/cpp/repro.c`](app/src/main/cpp/repro.c) — the actual
-  trigger sequence; ~300 lines including EGL bring-up + the textured-quad
+  trigger sequence; ~230 lines including EGL bring-up + the textured-quad
   draw + readback.
 - [`app/src/main/cpp/jni_glue.c`](app/src/main/cpp/jni_glue.c) — single
   JNI entry point.
