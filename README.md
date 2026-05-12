@@ -83,6 +83,30 @@ To switch between rows, edit `app/src/main/cpp/repro.c`:
 
 ## Reproducing locally
 
+Two ways to run it. The instrumented test gives a hard pass/fail signal
+straight from JUnit; the activity gives a PNG you can eyeball.
+
+### As an instrumented test (canonical pass/fail)
+
+```sh
+# Launch an emulator with `-gpu swiftshader` (or `-gpu swangle`), then:
+./gradlew :app:connectedDebugAndroidTest
+```
+
+On `-gpu swangle` the test passes. On `-gpu swiftshader` it fails with
+something like:
+
+```
+com.example.swsrepro.ReproTest > immutableTextureSamplesAsRed FAILED
+  java.lang.AssertionError:
+    pixel (0, 0): expected [255, 0, 0, 255], got [0, 0, 0, 0]:
+    arrays first differed at element [0]; expected:<255> but was:<0>
+```
+
+Source: [`app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt`](app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt).
+
+### As an activity (visual PNG)
+
 ```sh
 ./gradlew assembleDebug
 # launch an emulator with `-gpu swiftshader`, then:
@@ -90,20 +114,27 @@ APK_PATH=app/build/outputs/apk/debug/app-debug.apk ./ci/run-repro.sh
 # inspect `artifacts/swsrepro-logcat.txt` and `artifacts/pngs/test.png`
 ```
 
-Or push a branch — `.github/workflows/repro.yml` runs the build + emulator
-matrix automatically for both `swiftshader` and `swangle`. CI artifacts
-include the PNGs.
+### Or just push a branch
+
+[`.github/workflows/repro.yml`](.github/workflows/repro.yml) runs the
+build + emulator matrix automatically for both `swiftshader` and
+`swangle`, producing both the PNG and the JUnit reports as CI artifacts.
+On `swiftshader` the "Run instrumented test" step shows red — that's the
+bug demonstration in the GitHub Actions UI.
 
 ## Source
 
 - [`app/src/main/cpp/repro.c`](app/src/main/cpp/repro.c) — the actual
-  trigger sequence; ~230 lines including EGL bring-up + the textured-quad
-  draw + readback.
+  trigger sequence; ~230 lines: EGL bring-up + the textured-quad draw +
+  readback.
 - [`app/src/main/cpp/jni_glue.c`](app/src/main/cpp/jni_glue.c) — single
-  JNI entry point.
+  JNI entry point (`ReproNative.runTest`).
 - [`app/src/main/kotlin/com/example/swsrepro/MainActivity.kt`](app/src/main/kotlin/com/example/swsrepro/MainActivity.kt)
   — calls `ReproNative.runTest` from `Activity.onCreate`, writes the
   result PNG to `cacheDir`.
+- [`app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt`](app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt)
+  — instrumented test that reads pixels `(0, 0)` and `(W/2, H/2)`
+  directly from the readback buffer and asserts both equal red.
 - [`.github/workflows/repro.yml`](.github/workflows/repro.yml) — runs
-  the build + emulator-run matrix on GHA for both `swiftshader` and
-  `swangle`.
+  the build + emulator matrix on GHA for both `swiftshader` and
+  `swangle`, including the JUnit run.
