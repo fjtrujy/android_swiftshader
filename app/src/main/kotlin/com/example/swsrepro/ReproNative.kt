@@ -3,38 +3,19 @@ package com.example.swsrepro
 object ReproNative {
     init { System.loadLibrary("swsrepro") }
 
-    const val WIDTH = 512
-    const val HEIGHT = 512
+    const val WIDTH = 256
+    const val HEIGHT = 256
 
     /**
-     * Phase 1 (preamble) — runs an off-thread fresh-context GLES2 draw.
+     * Render an immutable, single-level RGBA8 source texture (filled with red)
+     * into a destination FBO via a textured-quad shader, then glReadPixels back.
+     * The source texture's min filter is left at the default
+     * GL_NEAREST_MIPMAP_LINEAR.
      *
-     * Spawns a worker pthread which opens its own EGL display, creates a
-     * non-shared GLES2 context with a 1×1 pbuffer, compiles a uniform-color
-     * shader, draws once into a 512×512 RGBA8 FBO, reads back, and tears
-     * everything down. The pixel output is mostly diagnostic; the load-
-     * bearing effect is the EGL/GL activity on a worker thread.
+     * Expected (GLES3 §8.17): every pixel `(255, 0, 0, 255)`.
+     * On `-gpu swiftshader`: every pixel `(0, 0, 0, 0)`.
      *
-     * `outPixels` must be at least WIDTH * HEIGHT * 4 bytes. Returns a
-     * "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>" summary string.
-     */
-    @JvmStatic external fun runPreamble(outPixels: ByteArray): String
-
-    /**
-     * Phase 2 (test) — shared-context cross-thread upload + main-thread sample.
-     *
-     * Main thread initialises EGL and creates a GLES3 context A. A worker
-     * pthread creates context B with `share_context = A`, allocates a
-     * 256×256 RGBA8 texture, uploads opaque-red pixels via PBO +
-     * `glTexSubImage2D`, fences (`glFenceSync`), flushes, releases. Main
-     * thread `glWaitSync`s the fence, binds the worker-uploaded texture,
-     * draws a full-NDC quad into a 512×512 FBO, reads back.
-     *
-     * Expected output: every pixel `(255, 0, 0, 255)`.
-     * On `-gpu swiftshader` (after Phase 1 has run): every pixel `(0, 0, 0, 0)`.
-     *
-     * `outPixels` must be at least WIDTH * HEIGHT * 4 bytes. Returns a
-     * "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>" summary string.
+     * Returns "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>".
      */
     @JvmStatic external fun runTest(outPixels: ByteArray): String
 

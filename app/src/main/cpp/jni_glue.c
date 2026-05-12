@@ -1,9 +1,5 @@
-// JNI surface. Kotlin sees exactly two methods on ReproNative:
-//   runPreamble()             -> Phase 1, off-thread fresh-context GLES2 draw.
-//   runTest(outPixels)        -> Phase 2, shared-context cross-thread upload + sample.
-//
-// The dead-but-linked JNI exports for the historical variants live in
-// padding.c, where the reviewer doesn't have to look at them. See README.
+// JNI surface. Kotlin sees a single method on ReproNative:
+//   runTest(outPixels) -> shared-context cross-thread upload + sample.
 
 #include "repro.h"
 
@@ -34,36 +30,9 @@ static jstring make_summary(JNIEnv* env, const ReproStatus* status,
 }
 
 JNIEXPORT jstring JNICALL
-Java_com_example_swsrepro_ReproNative_runPreamble(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
-    (void)clazz;
-    const int W = SWSREPRO_V7_WIDTH, H = SWSREPRO_V7_HEIGHT;
-    const size_t byteCount = (size_t)W * (size_t)H * 4;
-
-    jsize len = (*env)->GetArrayLength(env, out_pixels);
-    if ((size_t)len < byteCount) {
-        ReproStatus s = {0};
-        snprintf(s.error, sizeof(s.error), "runPreamble outPixels too small (need %zu bytes)", byteCount);
-        return make_summary(env, &s, NULL, 0, 0);
-    }
-
-    uint8_t* pixels = malloc(byteCount);
-    if (!pixels) {
-        ReproStatus s = {0, "malloc failed"};
-        return make_summary(env, &s, NULL, 0, 0);
-    }
-    ReproStatus s = repro_variant10_offthread_gl(pixels, W, H);
-    if (s.success) {
-        (*env)->SetByteArrayRegion(env, out_pixels, 0, (jsize)byteCount, (const jbyte*)pixels);
-    }
-    jstring out = make_summary(env, &s, pixels, W, H);
-    free(pixels);
-    return out;
-}
-
-JNIEXPORT jstring JNICALL
 Java_com_example_swsrepro_ReproNative_runTest(JNIEnv* env, jclass clazz, jbyteArray out_pixels) {
     (void)clazz;
-    const int W = SWSREPRO_V7_WIDTH, H = SWSREPRO_V7_HEIGHT;
+    const int W = SWSREPRO_WIDTH, H = SWSREPRO_HEIGHT;
     const size_t byteCount = (size_t)W * (size_t)H * 4;
 
     jsize len = (*env)->GetArrayLength(env, out_pixels);
@@ -78,7 +47,7 @@ Java_com_example_swsrepro_ReproNative_runTest(JNIEnv* env, jclass clazz, jbyteAr
         ReproStatus s = {0, "malloc failed"};
         return make_summary(env, &s, NULL, 0, 0);
     }
-    ReproStatus s = repro_variant19_shared_context_upload_and_sample(pixels, W, H);
+    ReproStatus s = repro_run_test(pixels, W, H);
     if (s.success) {
         (*env)->SetByteArrayRegion(env, out_pixels, 0, (jsize)byteCount, (const jbyte*)pixels);
     }

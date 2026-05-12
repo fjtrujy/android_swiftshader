@@ -1,32 +1,51 @@
-// The actual SwiftShader repro — minimal slice.
+// SwiftShader Android-emulator render bug — minimal repro.
 //
-// Two test entry points are invoked from Kotlin, in order:
-//   `repro_variant10_offthread_gl`  — Phase 1 (preamble), via JNI runVariant10.
-//   `repro_variant19_shared_context_upload_and_sample`
-//                                   — Phase 2 (test),     via JNI runVariant19.
+// Sequence (entirely on the main thread):
+//   1. Bring up GLES3 + 1x1 pbuffer surface.
+//   2. Create an IMMUTABLE 256x256 RGBA8 source texture via glTexStorage2D
+//      with 1 mipmap level. Upload opaque red via glTexSubImage2D from a
+//      CPU buffer. Do NOT call glTexParameteri — leave the default
+//      min filter (GL_NEAREST_MIPMAP_LINEAR).
+//   3. Create a 256x256 RGBA8 destination texture + FBO. Clear to a
+//      sentinel BLUE so "draw didn't run" is distinguishable from
+//      "sample returned zero".
+//   4. Compile + link a textured-quad shader; draw a fullscreen quad
+//      sampling the source texture into the FBO.
+//   5. glReadPixels back.
 //
-// See ../README.md for the full call trace + hypotheses.
+// Expected output per GLES3 spec section 8.17 (immutable textures are
+// always complete): every pixel `(255, 0, 0, 255)`.
 //
-// Historical variants 2-9, 11-18 live in `padding.c`. They are not invoked
-// but must be present in the linked library for the bug to reproduce —
-// stripping them makes the bug stop, for reasons we don't understand.
+// Actual:
+//   - `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan): red ✅.
+//   - `-gpu swiftshader`: `(0, 0, 0, 0)` ❌. Two spec violations stacked:
+//     a) SwiftShader treats the 1-level immutable texture as incomplete
+//        because the default min filter is mipmap-aware. GLES3 §8.17
+//        says immutable textures are always complete.
+//     b) Sampling an incomplete texture returns (0, 0, 0, 0). GLES3
+//        §8.17 requires (0, 0, 0, 1) for float texture types.
+//
+// Client workaround: call
+//   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+// (or any non-mipmap-aware filter) after creating the source texture.
 
-#include "repro_internal.h"
+#include "repro.h"
 
-#include <pthread.h>
+#include <EGL/egl.h>
+#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <android/log.h>
 
 #define LOG_TAG "swsrepro"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  LOG_TAG, __VA_ARGS__)
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
-// ---------------------------------------------------------------------------
-// Shared helpers (non-static so padding.c can also use them).
-// ---------------------------------------------------------------------------
+#define SIZE 256
 
-void set_err(ReproStatus* s, const char* msg) {
+static void set_err(ReproStatus* s, const char* msg) {
     s->success = 0;
     size_t n = strlen(msg);
     if (n >= sizeof(s->error)) n = sizeof(s->error) - 1;
@@ -34,7 +53,7 @@ void set_err(ReproStatus* s, const char* msg) {
     s->error[n] = '\0';
 }
 
-int check_gl(ReproStatus* s, const char* where) {
+static int check_gl(ReproStatus* s, const char* where) {
     GLenum err = glGetError();
     if (err == GL_NO_ERROR) return 1;
     char buf[128];
@@ -43,7 +62,7 @@ int check_gl(ReproStatus* s, const char* where) {
     return 0;
 }
 
-GLuint compile_shader(GLenum type, const char* src, ReproStatus* s) {
+static GLuint compile_shader(GLenum type, const char* src, ReproStatus* s) {
     GLuint sh = glCreateShader(type);
     glShaderSource(sh, 1, &src, NULL);
     glCompileShader(sh);
@@ -61,70 +80,7 @@ GLuint compile_shader(GLenum type, const char* src, ReproStatus* s) {
     return sh;
 }
 
-// Brings up an offscreen GLES context (version 2 or 3) backed by a 1x1 pbuffer,
-// runs `do_work`, then tears everything down.
-ReproStatus run_with_gl(int gles_version, uint8_t* pixels, int width, int height, WorkFn do_work) {
-    ReproStatus s = {0};
-
-    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (display == EGL_NO_DISPLAY) { set_err(&s, "eglGetDisplay returned EGL_NO_DISPLAY"); return s; }
-    if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "eglInitialize failed"); return s; }
-
-    const EGLint renderable = (gles_version >= 3) ? EGL_OPENGL_ES3_BIT : EGL_OPENGL_ES2_BIT;
-    const EGLint cfg_attribs[] = {
-        EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
-        EGL_RENDERABLE_TYPE, renderable,
-        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
-        EGL_DEPTH_SIZE, 0, EGL_STENCIL_SIZE, 0,
-        EGL_NONE
-    };
-    EGLConfig config;
-    EGLint num_configs = 0;
-    if (!eglChooseConfig(display, cfg_attribs, &config, 1, &num_configs) || num_configs < 1) {
-        set_err(&s, "eglChooseConfig failed"); eglTerminate(display); return s;
-    }
-    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, gles_version, EGL_NONE };
-    EGLContext context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
-    if (context == EGL_NO_CONTEXT) { set_err(&s, "eglCreateContext failed"); eglTerminate(display); return s; }
-    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-    EGLSurface surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
-    if (surface == EGL_NO_SURFACE) {
-        set_err(&s, "eglCreatePbufferSurface failed");
-        eglDestroyContext(display, context); eglTerminate(display); return s;
-    }
-    if (!eglMakeCurrent(display, surface, surface, context)) {
-        set_err(&s, "eglMakeCurrent failed");
-        eglDestroySurface(display, surface); eglDestroyContext(display, context); eglTerminate(display); return s;
-    }
-
-    LOGI("GL_VENDOR='%s' GL_RENDERER='%s' GL_VERSION='%s'",
-         (const char*)glGetString(GL_VENDOR),
-         (const char*)glGetString(GL_RENDERER),
-         (const char*)glGetString(GL_VERSION));
-
-    s = do_work(pixels, width, height);
-
-    eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    eglDestroySurface(display, surface);
-    eglDestroyContext(display, context);
-    eglTerminate(display);
-    return s;
-}
-
-// ---------------------------------------------------------------------------
-// Shaders (non-static; padding.c also uses some of these).
-// ---------------------------------------------------------------------------
-
-const char* VS_OFFSET_QUAD_SRC =
-    "attribute vec2 a_pos;\n"
-    "void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
-
-const char* FS_UNIFORM_COLOR_SRC =
-    "precision mediump float;\n"
-    "uniform vec4 u_color;\n"
-    "void main() { gl_FragColor = u_color; }\n";
-
-const char* VS_TEXTURED_QUAD_SRC =
+static const char* VS_SRC =
     "attribute vec2 a_pos;\n"
     "attribute vec2 a_uv;\n"
     "varying vec2 v_uv;\n"
@@ -133,222 +89,26 @@ const char* VS_TEXTURED_QUAD_SRC =
     "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
     "}\n";
 
-const char* FS_TEXTURED_QUAD_SRC =
+static const char* FS_SRC =
     "precision mediump float;\n"
     "varying vec2 v_uv;\n"
     "uniform sampler2D u_tex;\n"
     "void main() { gl_FragColor = texture2D(u_tex, v_uv); }\n";
 
-// ---------------------------------------------------------------------------
-// Phase 1 helper: a 256x256 RGBA8 FBO + .copy-blend red-quad draw.
-// (Defined non-static for padding.c, which also exercises this pattern.)
-// ---------------------------------------------------------------------------
-
-ReproStatus offset_quad_copy_blend(uint8_t* pixels, int width, int height) {
-    ReproStatus s = {0};
-    GLuint texture = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
-
-    glGenTextures(1, &texture);
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-    GLenum st = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    if (st != GL_FRAMEBUFFER_COMPLETE) {
-        char buf[128]; snprintf(buf, sizeof(buf), "offset_quad FBO incomplete, status=0x%04X", st);
-        set_err(&s, buf); goto cleanup;
-    }
-
-    vs = compile_shader(GL_VERTEX_SHADER, VS_OFFSET_QUAD_SRC, &s); if (!vs) goto cleanup;
-    fs = compile_shader(GL_FRAGMENT_SHADER, FS_UNIFORM_COLOR_SRC, &s); if (!fs) goto cleanup;
-    program = glCreateProgram();
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glBindAttribLocation(program, 0, "a_pos");
-    glLinkProgram(program);
-    GLint linked = 0; glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    if (!linked) {
-        char log[256] = {0}; glGetProgramInfoLog(program, sizeof(log) - 1, NULL, log);
-        char buf[256]; snprintf(buf, sizeof(buf), "offset_quad link failed: %s", log);
-        set_err(&s, buf); goto cleanup;
-    }
-    glUseProgram(program);
-    GLint u_color = glGetUniformLocation(program, "u_color");
-
-    static const GLfloat quad[] = {
-        -0.5f, -0.5f,  0.5f, -0.5f,
-        -0.5f,  0.5f,  0.5f,  0.5f,
-    };
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, NULL);
-
-    glViewport(0, 0, width, height);
-    glDisable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ZERO);             // `.copy` blend
-    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glUniform4f(u_color, 1.0f, 0.0f, 0.0f, 1.0f);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glFinish();
-
-    glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    if (!check_gl(&s, "offset_quad readback")) goto cleanup;
-    s.success = 1;
-
-cleanup:
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    if (vbo) glDeleteBuffers(1, &vbo);
-    if (program) glDeleteProgram(program);
-    if (vs) glDeleteShader(vs);
-    if (fs) glDeleteShader(fs);
-    if (fbo) glDeleteFramebuffers(1, &fbo);
-    if (texture) glDeleteTextures(1, &texture);
-    return s;
-}
-
-// ---------------------------------------------------------------------------
-// Phase 1: variant10 — preamble.
-// Off-thread, fresh (NOT shared) EGL context, GLES2, draws once, tears down.
-// ---------------------------------------------------------------------------
-
-struct V10ThreadArgs {
-    uint8_t* pixels;
-    int width;
-    int height;
-    ReproStatus result;
-};
-
-static void* v10_offthread_worker(void* arg) {
-    struct V10ThreadArgs* t = (struct V10ThreadArgs*)arg;
-    t->result = run_with_gl(2, t->pixels, t->width, t->height, offset_quad_copy_blend);
-    return NULL;
-}
-
-ReproStatus repro_variant10_offthread_gl(uint8_t* pixels, int width, int height) {
-    LOGI("variant10 (preamble): off-thread fresh-context GLES2 draw (%dx%d)", width, height);
-    struct V10ThreadArgs args = { .pixels = pixels, .width = width, .height = height };
-    pthread_t thread;
-    if (pthread_create(&thread, NULL, v10_offthread_worker, &args) != 0) {
-        ReproStatus s; set_err(&s, "variant10 pthread_create failed"); return s;
-    }
-    pthread_join(thread, NULL);
-    return args.result;
-}
-
-// ---------------------------------------------------------------------------
-// Phase 2: variant19 — the test.
-// Main thread EGL context A; worker thread creates context B with share_context
-// = A; uploads a 256x256 RGBA8 texture via PBO + glTexSubImage2D, fences, flushes,
-// releases. Main thread glWaitSync's the fence, samples the texture, reads back.
-// ---------------------------------------------------------------------------
-
-#define V19_SOURCE_SIZE  256
-#define V19_TARGET_W     512
-#define V19_TARGET_H     512
-
-struct V19Shared {
-    EGLDisplay display;
-    EGLConfig  config;
-    EGLContext main_context;
-    GLuint     texture;     // created by worker, sampled by main.
-    GLsync     fence;       // signalled by worker, waited by main.
-    int        worker_ok;
-    char       worker_err[128];
-};
-
-static void* v19_worker(void* arg) {
-    struct V19Shared* shared = (struct V19Shared*)arg;
-    shared->worker_ok = 0;
-    shared->worker_err[0] = '\0';
-
-    const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
-    EGLContext worker_context = eglCreateContext(shared->display, shared->config,
-                                                  shared->main_context, ctx_attribs);
-    if (worker_context == EGL_NO_CONTEXT) {
-        snprintf(shared->worker_err, sizeof(shared->worker_err),
-                 "v19 worker eglCreateContext (shared) failed, eglError=0x%04X", eglGetError());
-        return NULL;
-    }
-    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-    EGLSurface worker_surface = eglCreatePbufferSurface(shared->display, shared->config, pbuf_attribs);
-    if (worker_surface == EGL_NO_SURFACE) {
-        snprintf(shared->worker_err, sizeof(shared->worker_err), "v19 worker pbuffer failed");
-        eglDestroyContext(shared->display, worker_context); return NULL;
-    }
-    if (!eglMakeCurrent(shared->display, worker_surface, worker_surface, worker_context)) {
-        snprintf(shared->worker_err, sizeof(shared->worker_err), "v19 worker makeCurrent failed");
-        eglDestroySurface(shared->display, worker_surface);
-        eglDestroyContext(shared->display, worker_context); return NULL;
-    }
-
-    // Allocate the shared texture in the share group.
-    GLuint tex = 0;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, V19_SOURCE_SIZE, V19_SOURCE_SIZE);
-
-    // PBO-backed upload: map/memcpy red/unmap, then glTexSubImage2D from PBO offset 0.
-    GLuint pbo = 0;
-    glGenBuffers(1, &pbo);
-    glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
-    size_t byteSize = (size_t)V19_SOURCE_SIZE * (size_t)V19_SOURCE_SIZE * 4;
-    glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
-    void* mapped = glMapBufferRange(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
-                                     V_GL_MAP_WRITE_BIT | V_GL_MAP_INVALIDATE_BUFFER_BIT);
-    if (!mapped) {
-        snprintf(shared->worker_err, sizeof(shared->worker_err), "v19 worker glMapBufferRange returned NULL");
-        glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
-        glDeleteBuffers(1, &pbo); glDeleteTextures(1, &tex);
-        eglMakeCurrent(shared->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroySurface(shared->display, worker_surface);
-        eglDestroyContext(shared->display, worker_context);
-        return NULL;
-    }
-    uint8_t* m = (uint8_t*)mapped;
-    for (size_t i = 0; i < byteSize; i += 4) {
-        m[i+0] = 255; m[i+1] = 0; m[i+2] = 0; m[i+3] = 255;
-    }
-    glUnmapBuffer(V_GL_PIXEL_UNPACK_BUFFER);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, V19_SOURCE_SIZE, V19_SOURCE_SIZE,
-                    GL_RGBA, GL_UNSIGNED_BYTE, (const void*)(uintptr_t)0);
-    glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
-    glDeleteBuffers(1, &pbo);
-
-    // Fence and flush, hand off to main.
-    GLsync fence = glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    glFlush();
-    shared->texture = tex;
-    shared->fence   = fence;
-    shared->worker_ok = 1;
-
-    // Release the worker's hold on its context — only one thread can hold an
-    // EGL context current at once.
-    eglMakeCurrent(shared->display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    eglDestroySurface(shared->display, worker_surface);
-    eglDestroyContext(shared->display, worker_context);
-    return NULL;
-}
-
-static ReproStatus v19_main_path(uint8_t* pixels, int width, int height) {
+ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
+    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D; default mipmap min filter");
+
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;
-    EGLContext main_context = EGL_NO_CONTEXT;
-    EGLSurface main_surface = EGL_NO_SURFACE;
-    GLuint dst_tex = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
-    pthread_t worker_thread = 0;
-    struct V19Shared shared = {0};
+    EGLContext context = EGL_NO_CONTEXT;
+    EGLSurface surface = EGL_NO_SURFACE;
+    GLuint src_tex = 0, dst_tex = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
 
+    // EGL bring-up: GLES3 context + 1x1 pbuffer (drawing goes to an FBO).
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (display == EGL_NO_DISPLAY) { set_err(&s, "v19 main eglGetDisplay"); goto cleanup; }
-    if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "v19 main eglInitialize"); goto cleanup; }
+    if (display == EGL_NO_DISPLAY) { set_err(&s, "eglGetDisplay"); goto cleanup; }
+    if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "eglInitialize"); goto cleanup; }
 
     const EGLint cfg_attribs[] = {
         EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
@@ -359,58 +119,67 @@ static ReproStatus v19_main_path(uint8_t* pixels, int width, int height) {
     EGLConfig config;
     EGLint num_configs = 0;
     if (!eglChooseConfig(display, cfg_attribs, &config, 1, &num_configs) || num_configs < 1) {
-        set_err(&s, "v19 main eglChooseConfig"); goto cleanup;
+        set_err(&s, "eglChooseConfig"); goto cleanup;
     }
     const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
-    main_context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
-    if (main_context == EGL_NO_CONTEXT) { set_err(&s, "v19 main eglCreateContext"); goto cleanup; }
+    context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
+    if (context == EGL_NO_CONTEXT) { set_err(&s, "eglCreateContext"); goto cleanup; }
     const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
-    main_surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
-    if (main_surface == EGL_NO_SURFACE) { set_err(&s, "v19 main pbuffer"); goto cleanup; }
-    if (!eglMakeCurrent(display, main_surface, main_surface, main_context)) {
-        set_err(&s, "v19 main makeCurrent"); goto cleanup;
+    surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
+    if (surface == EGL_NO_SURFACE) { set_err(&s, "eglCreatePbufferSurface"); goto cleanup; }
+    if (!eglMakeCurrent(display, surface, surface, context)) {
+        set_err(&s, "eglMakeCurrent"); goto cleanup;
     }
 
-    shared.display      = display;
-    shared.config       = config;
-    shared.main_context = main_context;
-    if (pthread_create(&worker_thread, NULL, v19_worker, &shared) != 0) {
-        set_err(&s, "v19 pthread_create failed"); goto cleanup;
-    }
-    pthread_join(worker_thread, NULL);
-    if (!shared.worker_ok) {
-        char buf[200];
-        snprintf(buf, sizeof(buf), "v19 worker failed: %s", shared.worker_err);
-        set_err(&s, buf); goto cleanup;
-    }
+    LOGI("GL_VENDOR='%s' GL_RENDERER='%s' GL_VERSION='%s'",
+         (const char*)glGetString(GL_VENDOR),
+         (const char*)glGetString(GL_RENDERER),
+         (const char*)glGetString(GL_VERSION));
 
-    // Wait on the worker's fence (GPU-side), then sample the shared texture.
-    glWaitSync(shared.fence, 0, GL_TIMEOUT_IGNORED);
-    glDeleteSync(shared.fence);
-    shared.fence = NULL;
+    // *** THE BUG ***
+    // Immutable, single-level RGBA8 texture filled with opaque red.
+    // No glTexParameteri — default min filter is GL_NEAREST_MIPMAP_LINEAR.
+    // GLES3 §8.17 says this is complete; SwiftShader treats it as incomplete.
+    glGenTextures(1, &src_tex);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SIZE, SIZE);
+    {
+        size_t byteSize = (size_t)SIZE * (size_t)SIZE * 4;
+        uint8_t* cpu = (uint8_t*)malloc(byteSize);
+        if (!cpu) { set_err(&s, "malloc red buffer"); goto cleanup; }
+        for (size_t i = 0; i < byteSize; i += 4) {
+            cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
+        }
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIZE, SIZE,
+                        GL_RGBA, GL_UNSIGNED_BYTE, cpu);
+        free(cpu);
+    }
+    if (!check_gl(&s, "src texture setup")) goto cleanup;
 
+    // Destination FBO. Clear to BLUE so "draw didn't run" is visually distinct
+    // from "fragment shader wrote zeros".
     glGenTextures(1, &dst_tex);
     glBindTexture(GL_TEXTURE_2D, dst_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, V19_TARGET_W, V19_TARGET_H, 0,
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SIZE, SIZE, 0,
                  GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-
     glGenFramebuffers(1, &fbo);
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        set_err(&s, "v19 main FBO incomplete"); goto cleanup;
+        set_err(&s, "FBO incomplete"); goto cleanup;
     }
 
-    vs = compile_shader(GL_VERTEX_SHADER, VS_TEXTURED_QUAD_SRC, &s); if (!vs) goto cleanup;
-    fs = compile_shader(GL_FRAGMENT_SHADER, FS_TEXTURED_QUAD_SRC, &s); if (!fs) goto cleanup;
+    vs = compile_shader(GL_VERTEX_SHADER, VS_SRC, &s); if (!vs) goto cleanup;
+    fs = compile_shader(GL_FRAGMENT_SHADER, FS_SRC, &s); if (!fs) goto cleanup;
     program = glCreateProgram();
     glAttachShader(program, vs);
     glAttachShader(program, fs);
     glBindAttribLocation(program, 0, "a_pos");
     glBindAttribLocation(program, 1, "a_uv");
     glLinkProgram(program);
-    GLint linked = 0; glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    if (!linked) { set_err(&s, "v19 link failed"); goto cleanup; }
+    GLint linked = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) { set_err(&s, "link failed"); goto cleanup; }
     glUseProgram(program);
 
     static const GLfloat quad[] = {
@@ -429,41 +198,32 @@ static ReproStatus v19_main_path(uint8_t* pixels, int width, int height) {
                           (const void*)(2 * sizeof(GLfloat)));
 
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, shared.texture);
-    GLint u_tex = glGetUniformLocation(program, "u_tex");
-    glUniform1i(u_tex, 0);
+    glBindTexture(GL_TEXTURE_2D, src_tex);
+    glUniform1i(glGetUniformLocation(program, "u_tex"), 0);
 
-    glViewport(0, 0, V19_TARGET_W, V19_TARGET_H);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glViewport(0, 0, SIZE, SIZE);
+    glClearColor(0.f, 0.f, 1.f, 1.f); // BLUE sentinel
     glClear(GL_COLOR_BUFFER_BIT);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    glFinish();
 
-    glReadPixels(0, 0, V19_TARGET_W, V19_TARGET_H, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    if (!check_gl(&s, "v19 readback")) goto cleanup;
+    glReadPixels(0, 0, SIZE, SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(&s, "readback")) goto cleanup;
     s.success = 1;
 
 cleanup:
-    if (shared.texture) glDeleteTextures(1, &shared.texture);
     if (vbo) glDeleteBuffers(1, &vbo);
     if (program) glDeleteProgram(program);
     if (vs) glDeleteShader(vs);
     if (fs) glDeleteShader(fs);
     if (fbo) glDeleteFramebuffers(1, &fbo);
     if (dst_tex) glDeleteTextures(1, &dst_tex);
-    if (main_surface != EGL_NO_SURFACE) {
+    if (src_tex) glDeleteTextures(1, &src_tex);
+    if (surface != EGL_NO_SURFACE) {
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        eglDestroySurface(display, main_surface);
+        eglDestroySurface(display, surface);
     }
-    if (main_context != EGL_NO_CONTEXT) eglDestroyContext(display, main_context);
+    if (context != EGL_NO_CONTEXT) eglDestroyContext(display, context);
     if (display != EGL_NO_DISPLAY) eglTerminate(display);
     return s;
 }
 
-ReproStatus repro_variant19_shared_context_upload_and_sample(uint8_t* pixels, int width, int height) {
-    (void)width; (void)height;
-    LOGI("variant19 (test): shared-context worker uploads via PBO+fence; main glWaitSync + samples");
-    return v19_main_path(pixels, V19_TARGET_W, V19_TARGET_H);
-}

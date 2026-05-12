@@ -4,7 +4,6 @@ project(swsrepro C)
 add_library(swsrepro SHARED
     jni_glue.c
     repro.c
-    padding.c
 )
 
 target_link_libraries(swsrepro
