@@ -32,6 +32,7 @@
 #define V_GL_PIXEL_UNPACK_BUFFER       0x88EC
 #define V_GL_STREAM_DRAW               0x88E0
 #define V_GL_MAP_WRITE_BIT             0x0002
+#define V_GL_MAP_INVALIDATE_RANGE_BIT  0x0004
 
 #define SOURCE_SIZE  256
 #define TARGET_W     512
@@ -150,7 +151,7 @@ static ReproStatus run_test(uint8_t* pixels) {
         glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, pbo);
         glBufferData(V_GL_PIXEL_UNPACK_BUFFER, byteSize, NULL, V_GL_STREAM_DRAW);
         void* mapped = glMapBufferRange(V_GL_PIXEL_UNPACK_BUFFER, 0, byteSize,
-                                         V_GL_MAP_WRITE_BIT);  // no INVALIDATE_BUFFER_BIT
+                                         V_GL_MAP_WRITE_BIT | V_GL_MAP_INVALIDATE_RANGE_BIT);
         if (!mapped) {
             glBindBuffer(V_GL_PIXEL_UNPACK_BUFFER, 0);
             glDeleteBuffers(1, &pbo);
@@ -244,6 +245,6 @@ cleanup:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: single-thread PBO map/unmap (no INVALIDATE_BUFFER_BIT) + glTexSubImage2D");
+    LOGI("repro_run_test: single-thread PBO map/unmap (WRITE | INVALIDATE_RANGE) + glTexSubImage2D");
     return run_test(pixels);
 }
