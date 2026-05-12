@@ -122,6 +122,10 @@ jobs:
       #   - swiftshader: test fails (red) — that IS the bug demonstration.
       # `continue-on-error: true` so the swiftshader job still uploads its
       # artifacts after the deliberate failure.
+      #
+      # The previous step installed the APK from the build job (different
+      # debug keystore than the local Gradle build). Uninstall before the
+      # test step so Gradle can install its own freshly-built APK.
       - name: Run instrumented test
         continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
@@ -132,7 +136,10 @@ jobs:
           force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -no-audio -no-boot-anim -gpu ${{ matrix.gpu }}
           disable-animations: true
-          script: ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
+          script: |
+            adb uninstall com.example.swsrepro || true
+            adb uninstall com.example.swsrepro.test || true
+            ./gradlew :app:connectedDebugAndroidTest --no-daemon --stacktrace
 
       - name: Collect test reports
         if: always()
