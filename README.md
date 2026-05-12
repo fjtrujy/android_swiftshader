@@ -1,100 +1,113 @@
 # SwiftShader Android emulator render bug — minimal repro
 
-This repository is a minimal Android NDK reproducer for two spec violations
-in **SwiftShader 4.0.0.1**, as used by the Android emulator's OpenGL ES
-Translator (`-gpu swiftshader`). It builds a tiny APK that runs a single
-GL operation in `onCreate` and writes a PNG of the result.
+Minimal Android NDK reproducer for two ES 3.0 spec violations in
+**SwiftShader 4.0.0.1**, as used by the Android emulator's OpenGL ES
+Translator (`-gpu swiftshader`).
 
-## TL;DR
+A `glTexStorage2D`-allocated, single-level RGBA8 texture filled with
+opaque red samples as `(0, 0, 0, 0)` on `-gpu swiftshader` when the
+default min filter (`GL_NEAREST_MIPMAP_LINEAR`) is in effect. The same
+program on `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan) samples
+red, which is what the GLES 3 spec requires.
 
-The following sequence:
+## The trigger
 
 ```c
-GLuint src_tex;
-glGenTextures(1, &src_tex);
-glBindTexture(GL_TEXTURE_2D, src_tex);
+GLuint tex;
+glGenTextures(1, &tex);
+glBindTexture(GL_TEXTURE_2D, tex);
 glTexStorage2D(GL_TEXTURE_2D, 1 /* one level */, GL_RGBA8, w, h);
 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
                 GL_RGBA, GL_UNSIGNED_BYTE, redPixels);
-// NO glTexParameteri call — default min filter is GL_NEAREST_MIPMAP_LINEAR.
-// Then bind src_tex, draw a textured quad into an FBO, glReadPixels.
+// No glTexParameteri: min filter stays at the default
+// GL_NEAREST_MIPMAP_LINEAR. Then sample `tex` from a fragment shader
+// and glReadPixels — every pixel comes back (0, 0, 0, 0) on swiftshader.
 ```
 
-samples `(0, 0, 0, 0)` everywhere on `-gpu swiftshader`. Per GLES3 §8.17
-the texture is *complete* (immutable textures always are), so this should
-sample the red pixels back. `-gpu swangle` (ANGLE → Vulkan →
-SwiftShader-Vulkan) returns the expected red.
+Full code: [`app/src/main/cpp/repro.c`](app/src/main/cpp/repro.c)
+(~230 lines, single main thread, no PBO, no shared context, no blending).
 
-Two spec violations are stacked here:
+## What the spec says
 
-1. **glTexStorage2D-created textures are treated as incomplete when the
-   min filter is mipmap-aware.** Per GLES3 §8.17:
-   > A texture is "complete" […] if the texture was made immutable via a
-   > call to TexStorage*, the texture is considered complete.
-   SwiftShader instead applies the regular mip-level-count check
-   (`GL_NEAREST_MIPMAP_LINEAR` needs all levels present, only 1 is
-   allocated → incomplete).
-2. **Sampling an incomplete texture returns `(0, 0, 0, 0)` instead of
-   `(0, 0, 0, 1)`.** GLES3 §8.17:
-   > […] the value `(0, 0, 0, 1)` for floating-point texture types, or
-   > `(0, 0, 0, 0xFFFFFFFF)` for integer texture types, is returned.
-   SwiftShader returns alpha = 0.
+Both violations are in **GLES 3.0 §8.17, "Texture Completeness"**.
 
-Either alone would be an easy-to-work-around quirk. Stacked, they
-silently drop pixel data: in real-world code that uses
-`GL_ONE_MINUS_SRC_ALPHA` blending, swiftshader's `(0, 0, 0, 0)` blends
-to transparent black instead of the spec-correct `(0, 0, 0, 1)` opaque
-black — which is how this bug surfaced for us (everything we tried to
-upload through `glTexStorage2D` became transparent black on the
-emulator).
+### Violation 1 — immutable textures are unconditionally complete
 
-## Symptom
+> A texture is mipmap complete if [...] *or* the texture was made
+> immutable via a call to **TexStorage*** [...] in which case the
+> texture is unconditionally complete.
 
-| Variant                                                                    | swiftshader        | swangle (ANGLE)    |
-|----------------------------------------------------------------------------|--------------------|--------------------|
-| `glTexStorage2D` + 1 level + default mipmap min filter (this repro)        | `(0, 0, 0, 0)` ❌  | `(255, 0, 0, 255)` ✅ |
-| `glTexStorage2D` + 1 level + `glTexParameteri(..., GL_NEAREST)`            | `(255, 0, 0, 255)` ✅ | `(255, 0, 0, 255)` ✅ |
-| `glTexImage2D` (mutable) + 1 level + default mipmap min filter             | `(0, 0, 0, 0)` ❌  | `(0, 0, 0, 255)` ⚠️ (spec) |
-| `glTexImage2D` (mutable) + 1 level + `glTexParameteri(..., GL_NEAREST)`    | `(255, 0, 0, 255)` ✅ | `(255, 0, 0, 255)` ✅ |
+`glTexStorage2D` makes the texture immutable. The spec is explicit:
+once a texture is immutable, it's complete regardless of how many
+levels were allocated vs. how many the min filter would consume.
 
-Row 1 (the default repro on `main`) demonstrates **violation 1**:
-swiftshader treats a `glTexStorage2D` immutable texture as incomplete
-even though §8.17 says it should always be complete (and further shows
-**violation 2**: alpha is 0 instead of 1).
-Row 3 demonstrates **violation 2** in isolation: the texture is
-genuinely incomplete in both implementations, but only swangle returns
-the spec-correct `(0, 0, 0, 1)`.
+SwiftShader instead runs the standard mip-count check
+(`GL_NEAREST_MIPMAP_LINEAR` requires levels `0..floor(log2(max(w,h)))`,
+but only level 0 was allocated → flagged incomplete) and skips the
+"unconditionally complete" short-circuit for immutable textures.
 
-To switch between rows, edit `app/src/main/cpp/repro.c`:
-- Row 2 / 4: add `glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)` after the source texture is created.
-- Row 3 / 4: replace `glTexStorage2D` + `glTexSubImage2D` with a single `glTexImage2D` call.
+### Violation 2 — incomplete-texture sample value
 
-## Versions tested
+> If the texture is not complete, the texel value returned [...] is
+> `(0.0, 0.0, 0.0, 1.0)` for non-shadow [...] floating-point texture
+> types [...].
 
-| Component             | Version                                     |
-|-----------------------|---------------------------------------------|
-| Android emulator      | API 35, `system-images;android-35;google_apis;x86_64` |
-| `GL_VENDOR`           | `Google (Google Inc.)`                      |
-| `GL_RENDERER`         | `Android Emulator OpenGL ES Translator (Google SwiftShader)` |
-| `GL_VERSION`          | `OpenGL ES 3.0 (OpenGL ES 3.0 SwiftShader 4.0.0.1)` |
-| Android NDK           | `28.2.13676358`                             |
-| Compile / target SDK  | 35                                          |
-| Host                  | GitHub Actions `ubuntu-22.04` runners, KVM  |
+When the source texture is genuinely incomplete (e.g. mutable +
+single-level + mipmap-aware filter), the sample must return
+`(0, 0, 0, 1)` — opaque black. Swangle does this. SwiftShader returns
+`(0, 0, 0, 0)` — transparent black.
 
-## Reproducing locally
+This compounds with violation 1: the texture in this repro is *not*
+actually incomplete per spec, but SwiftShader thinks it is, and the
+incomplete-sample value it returns is also wrong. So a pipeline that
+blends against a `(0, 0, 0, 0)` destination ends up dropping the pixel
+entirely instead of producing opaque black.
 
-Two ways to run it. The instrumented test gives a hard pass/fail signal
-straight from JUnit; the activity gives a PNG you can eyeball.
+## Where the bug likely lives in SwiftShader
 
-### As an instrumented test (canonical pass/fail)
+I haven't read the source, but the symptom points at two specific
+places:
+
+1. The **immutable-texture short-circuit in the completeness check**
+   appears to be missing or unreached. The texture object presumably
+   has an `immutable` / `isImmutable` flag set by `glTexStorage2D`; the
+   completeness predicate should test it before falling through to the
+   per-level checks.
+2. The **incomplete-texture sentinel** appears to be a hard-coded
+   `(0, 0, 0, 0)` (e.g. a zero-init `vec4` or a memset'd byte buffer)
+   rather than the spec-required type-dependent value:
+   `(0, 0, 0, 1)` for floating-point sampled types,
+   `(0, 0, 0, 0xFFFFFFFF)` for integer ones.
+
+Fixing either one alone would already unbreak this repo's repro.
+
+## Effect on real applications
+
+A textured-quad pipeline that uses `GL_ONE_MINUS_SRC_ALPHA` blending
+against a `(0, 0, 0, 0)` destination drops the pixel entirely on
+swiftshader instead of producing opaque black — which is how this
+surfaced for us. Any application using `glTexStorage2D` for textures
+without explicitly setting a non-mipmap min filter is affected.
+
+**Client workaround**: call
+```c
+glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+// or GL_LINEAR
+```
+after creating the texture. Once the min filter is non-mipmap-aware,
+the completeness check passes on swiftshader and the sample returns
+red as expected.
+
+## Reproducing
+
+### As an instrumented test (hard pass/fail)
 
 ```sh
 # Launch an emulator with `-gpu swiftshader` (or `-gpu swangle`), then:
 ./gradlew :app:connectedDebugAndroidTest
 ```
 
-On `-gpu swangle` the test passes. On `-gpu swiftshader` it fails with
-something like:
+On `-gpu swangle` the test passes. On `-gpu swiftshader` it fails with:
 
 ```
 com.example.swsrepro.ReproTest > immutableTextureSamplesAsRed FAILED
@@ -103,9 +116,18 @@ com.example.swsrepro.ReproTest > immutableTextureSamplesAsRed FAILED
     arrays first differed at element [0]; expected:<255> but was:<0>
 ```
 
-Source: [`app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt`](app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt).
+The test reads pixels `(0, 0)` and `(W/2, H/2)` from the readback
+buffer and asserts both equal `(255, 0, 0, 255)`. Source:
+[`app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt`](app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt).
 
-### As an activity (visual PNG)
+### Via CI
+
+Push any branch and [`.github/workflows/repro.yml`](.github/workflows/repro.yml)
+runs the build + emulator matrix for both backends. The swiftshader
+job fails on the instrumented test (that *is* the bug demonstration);
+both jobs upload the rendered PNG + JUnit reports as CI artifacts.
+
+### Via the Activity (visual PNG)
 
 ```sh
 ./gradlew assembleDebug
@@ -114,27 +136,25 @@ APK_PATH=app/build/outputs/apk/debug/app-debug.apk ./ci/run-repro.sh
 # inspect `artifacts/swsrepro-logcat.txt` and `artifacts/pngs/test.png`
 ```
 
-### Or just push a branch
+## Versions tested
 
-[`.github/workflows/repro.yml`](.github/workflows/repro.yml) runs the
-build + emulator matrix automatically for both `swiftshader` and
-`swangle`, producing both the PNG and the JUnit reports as CI artifacts.
-On `swiftshader` the "Run instrumented test" step shows red — that's the
-bug demonstration in the GitHub Actions UI.
+| Component             | Version                                                       |
+|-----------------------|---------------------------------------------------------------|
+| Android emulator      | API 35, `system-images;android-35;google_apis;x86_64`         |
+| `GL_VENDOR`           | `Google (Google Inc.)`                                        |
+| `GL_RENDERER`         | `Android Emulator OpenGL ES Translator (Google SwiftShader)`  |
+| `GL_VERSION`          | `OpenGL ES 3.0 (OpenGL ES 3.0 SwiftShader 4.0.0.1)`           |
+| Android NDK           | `28.2.13676358`                                               |
+| Host                  | GitHub Actions `ubuntu-22.04` runners, KVM                    |
 
 ## Source
 
-- [`app/src/main/cpp/repro.c`](app/src/main/cpp/repro.c) — the actual
-  trigger sequence; ~230 lines: EGL bring-up + the textured-quad draw +
-  readback.
+- [`app/src/main/cpp/repro.c`](app/src/main/cpp/repro.c) — ~230 lines:
+  EGL bring-up + the textured-quad draw + readback.
 - [`app/src/main/cpp/jni_glue.c`](app/src/main/cpp/jni_glue.c) — single
   JNI entry point (`ReproNative.runTest`).
-- [`app/src/main/kotlin/com/example/swsrepro/MainActivity.kt`](app/src/main/kotlin/com/example/swsrepro/MainActivity.kt)
-  — calls `ReproNative.runTest` from `Activity.onCreate`, writes the
-  result PNG to `cacheDir`.
 - [`app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt`](app/src/androidTest/kotlin/com/example/swsrepro/ReproTest.kt)
-  — instrumented test that reads pixels `(0, 0)` and `(W/2, H/2)`
-  directly from the readback buffer and asserts both equal red.
-- [`.github/workflows/repro.yml`](.github/workflows/repro.yml) — runs
-  the build + emulator matrix on GHA for both `swiftshader` and
-  `swangle`, including the JUnit run.
+  — the pass/fail instrumented test.
+- [`.github/workflows/repro.yml`](.github/workflows/repro.yml) —
+  build + emulator matrix on GHA, runs both the visual repro and
+  the instrumented test for `swiftshader` and `swangle`.
