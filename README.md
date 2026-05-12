@@ -120,11 +120,14 @@ has likely substituted ANGLE for SwiftShader, so you're not actually
 exercising the broken path. To force the broken path you'd need an
 x86_64 host (Linux, Windows, or Intel macOS).
 
-(We tried `macos-13` and `macos-14` GHA runners as part of CI to catch
-the host-arch variation automatically, but GHA's macOS runners do not
-expose reliable nested virtualization for the Android emulator and the
-emulator boot hangs. The table above is from manual reproductions plus
-the Linux matrix that runs on every push.)
+Intel macOS isn't in the table above because we couldn't verify it
+empirically: GitHub Actions retired the `macos-13` runner (the last
+Intel-x86_64 macOS image — see
+[actions/runner-images](https://github.com/actions/runner-images#available-images))
+and the remaining `macos-14`/`macos-15` runners are Apple Silicon, which
+hit the silent ANGLE-substitution path. We expect Intel macOS to behave
+the same as Linux x86_64 (same emulator binary, same direct GLES
+translator path), but haven't confirmed it.
 
 ## Reproducing
 
