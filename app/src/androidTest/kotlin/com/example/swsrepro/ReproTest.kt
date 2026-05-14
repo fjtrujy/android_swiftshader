@@ -7,16 +7,12 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Hard pass/fail assertion of the SwiftShader render bug.
+ * Hard pass/fail assertion for the Goodnotes Android snapshot readback shape.
  *
- * Sampling an immutable, single-level RGBA8 texture filled with opaque red
- * MUST return opaque red (per GLES3 §8.17 — immutable textures are always
- * complete). On the Android emulator:
- *
- *   - `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan):  test passes.
- *   - `-gpu swiftshader`: test fails with red pixels coming back as (0, 0, 0, 0).
- *
- * The failure on swiftshader is the bug being demonstrated. See ../README.md.
+ * Native code renders four opaque quadrants into an immutable RGBA8 texture,
+ * then mirrors the snapshot recorder: source texture attached to
+ * READ_FRAMEBUFFER, Y-flipped glBlitFramebuffer into an RGBA8 renderbuffer,
+ * glReadPixels into CPU memory.
  */
 @RunWith(AndroidJUnit4::class)
 class ReproTest {
@@ -28,7 +24,7 @@ class ReproTest {
     }
 
     @Test
-    fun immutableTextureSamplesAsRed() {
+    fun flippedFramebufferBlitPreservesPixels() {
         val pixels = ByteArray(ReproNative.WIDTH * ReproNative.HEIGHT * 4)
         val summary = ReproNative.parse(ReproNative.runTest(pixels))
         assertTrue(
@@ -36,26 +32,32 @@ class ReproTest {
             summary.success,
         )
 
-        val expected = intArrayOf(255, 0, 0, 255)
-
-        // (0, 0) — first pixel of the readback buffer. Inside the textured
-        // quad (which covers the full NDC viewport), so it must sample to
-        // opaque red.
-        val first = pixelAt(pixels, 0, 0)
+        val row0Left = pixelAt(pixels, 0, 0)
         assertArrayEquals(
-            "pixel (0, 0): expected ${expected.toList()}, got ${first.toList()}",
-            expected,
-            first,
+            "row0-left should contain source top-left after flipped blit",
+            intArrayOf(0, 0, 255, 255),
+            row0Left,
         )
 
-        // Center of the 256x256 framebuffer. Same expectation.
-        val center = pixelAt(pixels, ReproNative.WIDTH / 2, ReproNative.HEIGHT / 2)
+        val row0Right = pixelAt(pixels, ReproNative.WIDTH - 1, 0)
         assertArrayEquals(
-            "pixel (${ReproNative.WIDTH / 2}, ${ReproNative.HEIGHT / 2}) " +
-                "(GLES3 §8.17 says the immutable texture is complete; " +
-                "expected ${expected.toList()}, got ${center.toList()})",
-            expected,
-            center,
+            "row0-right should contain source top-right after flipped blit",
+            intArrayOf(255, 255, 255, 255),
+            row0Right,
+        )
+
+        val lastRowLeft = pixelAt(pixels, 0, ReproNative.HEIGHT - 1)
+        assertArrayEquals(
+            "lastrow-left should contain source bottom-left after flipped blit",
+            intArrayOf(255, 0, 0, 255),
+            lastRowLeft,
+        )
+
+        val lastRowRight = pixelAt(pixels, ReproNative.WIDTH - 1, ReproNative.HEIGHT - 1)
+        assertArrayEquals(
+            "lastrow-right should contain source bottom-right after flipped blit",
+            intArrayOf(0, 255, 0, 255),
+            lastRowRight,
         )
     }
 }

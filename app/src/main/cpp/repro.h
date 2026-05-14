@@ -12,17 +12,15 @@ typedef struct {
     char error[256];
 } ReproStatus;
 
-// Render an immutable, single-level RGBA8 source texture (filled with opaque
-// red) into a destination FBO via a textured-quad shader, then glReadPixels
-// back. The source texture's min filter is left at the default
-// (GL_NEAREST_MIPMAP_LINEAR).
+// Render four opaque color quadrants into an immutable, single-level RGBA8
+// texture, then mirror the Goodnotes Android snapshot path: attach that texture
+// to READ_FRAMEBUFFER, blit into an RGBA8 renderbuffer with source Y flipped,
+// and glReadPixels back.
 //
-// Expected (GLES3 §8.17 — immutable textures are always complete):
-//   every pixel (255, 0, 0, 255).
-// On Android emulator `-gpu swiftshader`:
-//   every pixel (0, 0, 0, 0).
-// On `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan):
-//   every pixel (255, 0, 0, 255).
+// Expected row samples after the flipped blit:
+//   row0-left blue, row0-right white, lastrow-left red, lastrow-right green.
+// If direct `-gpu swiftshader` returns transparent black here, the Goodnotes
+// empty snapshot artifacts are likely in SwiftShader's FBO blit/readback path.
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height);
 
 #endif

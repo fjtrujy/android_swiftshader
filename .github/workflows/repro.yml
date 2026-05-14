@@ -106,7 +106,7 @@ jobs:
           disable-animations: true
           script: echo "AVD created"
 
-      - name: Run repro app (captures PNG + logcat)
+      - name: Run repro app (captures logcat)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35

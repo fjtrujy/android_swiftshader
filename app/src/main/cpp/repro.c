@@ -1,29 +1,18 @@
-// SwiftShader Android-emulator render bug — TESTING WORKAROUND.
+// SwiftShader Android-emulator render bug — Goodnotes snapshot readback probe.
 //
-// This branch is NOT the bug demonstration; it tests whether allocating
-// the full mipmap chain (floor(log2(SIZE))+1 levels) and filling levels
-// 1..N-1 via glGenerateMipmap makes the test pass on `-gpu swiftshader`.
-// The unmodified repro on `main` allocates 1 level and fails on
-// swiftshader because SwiftShader incorrectly treats the 1-level
-// immutable texture as incomplete under the default mipmap-aware min
-// filter. See main's README for the full bug description.
+// This variant intentionally avoids the already-known immutable-texture
+// sampler bug by setting a non-mipmap min filter. It instead mirrors the
+// Android snapshot extraction path from Goodnotes:
 //
-// Sequence (entirely on the main thread):
-//   1. Bring up GLES3 + 1x1 pbuffer surface.
-//   2. Create an IMMUTABLE 256x256 RGBA8 source texture via glTexStorage2D
-//      with the full mipmap chain (9 levels). Upload opaque red into
-//      level 0 via glTexSubImage2D. Fill levels 1..8 with glGenerateMipmap.
-//      Leave the default mipmap-aware min filter in place.
-//   3. Create a 256x256 RGBA8 destination texture + FBO. Clear to a
-//      sentinel BLUE so "draw didn't run" is distinguishable from
-//      "sample returned zero".
-//   4. Compile + link a textured-quad shader; draw a fullscreen quad
-//      sampling the source texture into the FBO.
-//   5. glReadPixels back.
+//   1. Create a GLES3 pbuffer context.
+//   2. Allocate a single-level immutable RGBA8 texture with glTexStorage2D.
+//   3. Attach it to an FBO and clear four opaque color quadrants into it.
+//   4. Attach that texture as READ_FRAMEBUFFER, blit into a temporary RGBA8
+//      renderbuffer using swapped source Y coordinates, then glReadPixels.
 //
-// Expected with the workaround applied: every pixel `(255, 0, 0, 255)`
-// on BOTH `-gpu swangle` and `-gpu swiftshader`. If the swiftshader CI
-// job still fails on this branch, the workaround does not fix the bug.
+// If this comes back transparent black on direct `-gpu swiftshader`, the
+// empty Goodnotes Android recordings are likely in SwiftShader's FBO blit or
+// readback path rather than in source texture sampling.
 
 #include "repro.h"
 
@@ -31,22 +20,19 @@
 #include <GLES2/gl2.h>
 #include <GLES3/gl3.h>
 
+#include <android/log.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <android/log.h>
 
 #define LOG_TAG "swsrepro"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 #define SIZE 256
 
-// floor(log2(size)) + 1 — the full mipmap chain length for a square texture.
-static int mip_levels_for(int size) {
-    int levels = 1;
-    while (size > 1) { size >>= 1; levels++; }
-    return levels;
-}
+typedef struct {
+    uint8_t r, g, b, a;
+} Pixel;
 
 static void set_err(ReproStatus* s, const char* msg) {
     s->success = 0;
@@ -65,50 +51,167 @@ static int check_gl(ReproStatus* s, const char* where) {
     return 0;
 }
 
-static GLuint compile_shader(GLenum type, const char* src, ReproStatus* s) {
-    GLuint sh = glCreateShader(type);
-    glShaderSource(sh, 1, &src, NULL);
-    glCompileShader(sh);
-    GLint ok = 0;
-    glGetShaderiv(sh, GL_COMPILE_STATUS, &ok);
-    if (!ok) {
-        char log[256] = {0};
-        glGetShaderInfoLog(sh, sizeof(log) - 1, NULL, log);
-        char buf[256];
-        snprintf(buf, sizeof(buf), "shader compile (type=0x%04X) failed: %s", type, log);
-        set_err(s, buf);
-        glDeleteShader(sh);
-        return 0;
-    }
-    return sh;
+static int check_fbo(ReproStatus* s, GLenum target, const char* where) {
+    GLenum status = glCheckFramebufferStatus(target);
+    if (status == GL_FRAMEBUFFER_COMPLETE) return 1;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s: framebuffer status = 0x%04X", where, status);
+    set_err(s, buf);
+    return 0;
 }
 
-static const char* VS_SRC =
-    "attribute vec2 a_pos;\n"
-    "attribute vec2 a_uv;\n"
-    "varying vec2 v_uv;\n"
-    "void main() {\n"
-    "  v_uv = a_uv;\n"
-    "  gl_Position = vec4(a_pos, 0.0, 1.0);\n"
-    "}\n";
+static Pixel pixel_at(const uint8_t* pixels, int width, int x, int y) {
+    size_t offset = ((size_t)y * (size_t)width + (size_t)x) * 4;
+    Pixel p = {
+        pixels[offset + 0],
+        pixels[offset + 1],
+        pixels[offset + 2],
+        pixels[offset + 3],
+    };
+    return p;
+}
 
-static const char* FS_SRC =
-    "precision mediump float;\n"
-    "varying vec2 v_uv;\n"
-    "uniform sampler2D u_tex;\n"
-    "void main() { gl_FragColor = texture2D(u_tex, v_uv); }\n";
+static void log_samples(const char* label, const uint8_t* pixels, int width, int height) {
+    Pixel bl = pixel_at(pixels, width, 0, 0);
+    Pixel br = pixel_at(pixels, width, width - 1, 0);
+    Pixel tl = pixel_at(pixels, width, 0, height - 1);
+    Pixel tr = pixel_at(pixels, width, width - 1, height - 1);
+    Pixel c = pixel_at(pixels, width, width / 2, height / 2);
+    LOGI("%s: row0-left=(%u,%u,%u,%u) row0-right=(%u,%u,%u,%u) "
+         "lastrow-left=(%u,%u,%u,%u) lastrow-right=(%u,%u,%u,%u) "
+         "center=(%u,%u,%u,%u)",
+         label,
+         bl.r, bl.g, bl.b, bl.a,
+         br.r, br.g, br.b, br.a,
+         tl.r, tl.g, tl.b, tl.a,
+         tr.r, tr.g, tr.b, tr.a,
+         c.r, c.g, c.b, c.a);
+}
+
+static void clear_rect(GLint x, GLint y, GLsizei width, GLsizei height,
+                       GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
+    glScissor(x, y, width, height);
+    glClearColor(r, g, b, a);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
+
+static void fill_quadrants(GLuint framebuffer) {
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    glViewport(0, 0, SIZE, SIZE);
+    glEnable(GL_SCISSOR_TEST);
+
+    const GLsizei half = SIZE / 2;
+    clear_rect(0, 0, half, half, 1.f, 0.f, 0.f, 1.f);       // GL bottom-left: red
+    clear_rect(half, 0, half, half, 0.f, 1.f, 0.f, 1.f);    // GL bottom-right: green
+    clear_rect(0, half, half, half, 0.f, 0.f, 1.f, 1.f);    // GL top-left: blue
+    clear_rect(half, half, half, half, 1.f, 1.f, 1.f, 1.f); // GL top-right: white
+
+    glDisable(GL_SCISSOR_TEST);
+}
+
+static int read_source_direct(ReproStatus* s, GLuint source_fbo) {
+    uint8_t* direct = (uint8_t*)malloc((size_t)SIZE * (size_t)SIZE * 4);
+    if (!direct) {
+        set_err(s, "malloc direct buffer");
+        return 0;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, source_fbo);
+    if (!check_fbo(s, GL_READ_FRAMEBUFFER, "direct source read FBO")) {
+        free(direct);
+        return 0;
+    }
+    glReadPixels(0, 0, SIZE, SIZE, GL_RGBA, GL_UNSIGNED_BYTE, direct);
+    if (!check_gl(s, "direct source glReadPixels")) {
+        free(direct);
+        return 0;
+    }
+    log_samples("direct source texture readback", direct, SIZE, SIZE);
+    free(direct);
+    return 1;
+}
+
+static int blit_then_read(ReproStatus* s, GLuint source_fbo, uint8_t* pixels, int flip_y) {
+    GLuint dst_rbo = 0;
+    GLuint dst_fbo = 0;
+
+    glGenRenderbuffers(1, &dst_rbo);
+    glBindRenderbuffer(GL_RENDERBUFFER, dst_rbo);
+    glRenderbufferStorage(GL_RENDERBUFFER, GL_RGBA8, SIZE, SIZE);
+
+    glGenFramebuffers(1, &dst_fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst_fbo);
+    glFramebufferRenderbuffer(
+        GL_DRAW_FRAMEBUFFER,
+        GL_COLOR_ATTACHMENT0,
+        GL_RENDERBUFFER,
+        dst_rbo
+    );
+    if (!check_fbo(s, GL_DRAW_FRAMEBUFFER, flip_y ? "flipped blit draw FBO" : "plain blit draw FBO")) {
+        goto fail;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, source_fbo);
+    if (!check_fbo(s, GL_READ_FRAMEBUFFER, flip_y ? "flipped blit read FBO" : "plain blit read FBO")) {
+        goto fail;
+    }
+
+    if (flip_y) {
+        glBlitFramebuffer(
+            0, SIZE, SIZE, 0,
+            0, 0, SIZE, SIZE,
+            GL_COLOR_BUFFER_BIT,
+            GL_NEAREST
+        );
+    } else {
+        glBlitFramebuffer(
+            0, 0, SIZE, SIZE,
+            0, 0, SIZE, SIZE,
+            GL_COLOR_BUFFER_BIT,
+            GL_NEAREST
+        );
+    }
+    if (!check_gl(s, flip_y ? "flipped glBlitFramebuffer" : "plain glBlitFramebuffer")) {
+        goto fail;
+    }
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, dst_fbo);
+    if (!check_fbo(s, GL_READ_FRAMEBUFFER, flip_y ? "flipped readback FBO" : "plain readback FBO")) {
+        goto fail;
+    }
+    glReadPixels(0, 0, SIZE, SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    if (!check_gl(s, flip_y ? "flipped glReadPixels" : "plain glReadPixels")) {
+        goto fail;
+    }
+
+    log_samples(flip_y ? "flipped blit readback" : "plain blit readback", pixels, SIZE, SIZE);
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    glDeleteFramebuffers(1, &dst_fbo);
+    glDeleteRenderbuffers(1, &dst_rbo);
+    return 1;
+
+fail:
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+    glBindRenderbuffer(GL_RENDERBUFFER, 0);
+    if (dst_fbo) glDeleteFramebuffers(1, &dst_fbo);
+    if (dst_rbo) glDeleteRenderbuffers(1, &dst_rbo);
+    return 0;
+}
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: glTexStorage2D (immutable, full mipmap chain) + glTexSubImage2D + glGenerateMipmap; default mipmap min filter");
+    LOGI("repro_run_test: immutable render target + FBO quadrant clears + Goodnotes-style flipped glBlitFramebuffer readback");
 
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLContext context = EGL_NO_CONTEXT;
     EGLSurface surface = EGL_NO_SURFACE;
-    GLuint src_tex = 0, dst_tex = 0, fbo = 0, vs = 0, fs = 0, program = 0, vbo = 0;
+    GLuint render_tex = 0, source_fbo = 0;
 
-    // EGL bring-up: GLES3 context + 1x1 pbuffer (drawing goes to an FBO).
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (display == EGL_NO_DISPLAY) { set_err(&s, "eglGetDisplay"); goto cleanup; }
     if (!eglInitialize(display, NULL, NULL)) { set_err(&s, "eglInitialize"); goto cleanup; }
@@ -139,93 +242,41 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // *** TESTING WORKAROUND: full mipmap chain + glGenerateMipmap ***
-    // Immutable RGBA8 texture allocated with the full mipmap chain
-    // (floor(log2(SIZE))+1 levels = 9 for SIZE=256). Upload opaque red
-    // into level 0; let glGenerateMipmap fill levels 1..N-1. The default
-    // GL_NEAREST_MIPMAP_LINEAR min filter then has all the levels it
-    // asks for, so the completeness check passes even on SwiftShader's
-    // (buggy) non-immutable-aware path.
-    int levels = mip_levels_for(SIZE);
-    glGenTextures(1, &src_tex);
-    glBindTexture(GL_TEXTURE_2D, src_tex);
-    glTexStorage2D(GL_TEXTURE_2D, levels, GL_RGBA8, SIZE, SIZE);
+    glGenTextures(1, &render_tex);
+    glBindTexture(GL_TEXTURE_2D, render_tex);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SIZE, SIZE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    if (!check_gl(&s, "render texture setup")) goto cleanup;
+
+    glGenFramebuffers(1, &source_fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, source_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, render_tex, 0);
+    if (!check_fbo(&s, GL_FRAMEBUFFER, "source render texture FBO")) goto cleanup;
+
+    fill_quadrants(source_fbo);
+    if (!check_gl(&s, "quadrant clears")) goto cleanup;
+
+    if (!read_source_direct(&s, source_fbo)) goto cleanup;
+
     {
-        size_t byteSize = (size_t)SIZE * (size_t)SIZE * 4;
-        uint8_t* cpu = (uint8_t*)malloc(byteSize);
-        if (!cpu) { set_err(&s, "malloc red buffer"); goto cleanup; }
-        for (size_t i = 0; i < byteSize; i += 4) {
-            cpu[i+0] = 255; cpu[i+1] = 0; cpu[i+2] = 0; cpu[i+3] = 255;
-        }
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, SIZE, SIZE,
-                        GL_RGBA, GL_UNSIGNED_BYTE, cpu);
-        free(cpu);
-    }
-    glGenerateMipmap(GL_TEXTURE_2D);
-    if (!check_gl(&s, "src texture setup")) goto cleanup;
-
-    // Destination FBO. Clear to BLUE so "draw didn't run" is visually distinct
-    // from "fragment shader wrote zeros".
-    glGenTextures(1, &dst_tex);
-    glBindTexture(GL_TEXTURE_2D, dst_tex);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, SIZE, SIZE, 0,
-                 GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dst_tex, 0);
-    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-        set_err(&s, "FBO incomplete"); goto cleanup;
+        uint8_t* plain = (uint8_t*)malloc((size_t)SIZE * (size_t)SIZE * 4);
+        if (!plain) { set_err(&s, "malloc plain blit buffer"); goto cleanup; }
+        int ok = blit_then_read(&s, source_fbo, plain, 0);
+        free(plain);
+        if (!ok) goto cleanup;
     }
 
-    vs = compile_shader(GL_VERTEX_SHADER, VS_SRC, &s); if (!vs) goto cleanup;
-    fs = compile_shader(GL_FRAGMENT_SHADER, FS_SRC, &s); if (!fs) goto cleanup;
-    program = glCreateProgram();
-    glAttachShader(program, vs);
-    glAttachShader(program, fs);
-    glBindAttribLocation(program, 0, "a_pos");
-    glBindAttribLocation(program, 1, "a_uv");
-    glLinkProgram(program);
-    GLint linked = 0;
-    glGetProgramiv(program, GL_LINK_STATUS, &linked);
-    if (!linked) { set_err(&s, "link failed"); goto cleanup; }
-    glUseProgram(program);
+    if (!blit_then_read(&s, source_fbo, pixels, 1)) goto cleanup;
 
-    static const GLfloat quad[] = {
-        -1.f, -1.f, 0.f, 0.f,
-         1.f, -1.f, 1.f, 0.f,
-        -1.f,  1.f, 0.f, 1.f,
-         1.f,  1.f, 1.f, 1.f,
-    };
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(quad), quad, GL_STATIC_DRAW);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), NULL);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
-                          (const void*)(2 * sizeof(GLfloat)));
-
-    glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, src_tex);
-    glUniform1i(glGetUniformLocation(program, "u_tex"), 0);
-
-    glViewport(0, 0, SIZE, SIZE);
-    glClearColor(0.f, 0.f, 1.f, 1.f); // BLUE sentinel
-    glClear(GL_COLOR_BUFFER_BIT);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-
-    glReadPixels(0, 0, SIZE, SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    if (!check_gl(&s, "readback")) goto cleanup;
+    glFinish();
     s.success = 1;
 
 cleanup:
-    if (vbo) glDeleteBuffers(1, &vbo);
-    if (program) glDeleteProgram(program);
-    if (vs) glDeleteShader(vs);
-    if (fs) glDeleteShader(fs);
-    if (fbo) glDeleteFramebuffers(1, &fbo);
-    if (dst_tex) glDeleteTextures(1, &dst_tex);
-    if (src_tex) glDeleteTextures(1, &src_tex);
+    if (source_fbo) glDeleteFramebuffers(1, &source_fbo);
+    if (render_tex) glDeleteTextures(1, &render_tex);
     if (surface != EGL_NO_SURFACE) {
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroySurface(display, surface);
@@ -234,4 +285,3 @@ cleanup:
     if (display != EGL_NO_DISPLAY) eglTerminate(display);
     return s;
 }
-

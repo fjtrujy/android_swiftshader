@@ -42,19 +42,6 @@ adb logcat -d \
 echo "=== device-side cache listing ==="
 adb shell "run-as $PKG ls -la cache/ 2>&1 || echo 'cache dir not readable'"
 
-echo "=== pull PNG via run-as (debuggable APK) ==="
-ABS_OUT="$(pwd)/$OUT_DIR/pngs"
-mkdir -p "$ABS_OUT"
-dest="$ABS_OUT/test.png"
-# exec-out preserves binary bytes (no CRLF mangling).
-adb exec-out "run-as $PKG cat cache/test.png" > "$dest" 2>/dev/null || true
-if [ ! -s "$dest" ]; then
-  rm -f "$dest"
-  echo "  test: not produced"
-else
-  echo "  test: $(wc -c < "$dest") bytes"
-fi
-
 echo "=== artifacts contents ==="
 echo "cwd=$(pwd)"
 ls -laR "$OUT_DIR" || true

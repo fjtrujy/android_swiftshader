@@ -7,13 +7,9 @@ object ReproNative {
     const val HEIGHT = 256
 
     /**
-     * Render an immutable, single-level RGBA8 source texture (filled with red)
-     * into a destination FBO via a textured-quad shader, then glReadPixels back.
-     * The source texture's min filter is left at the default
-     * GL_NEAREST_MIPMAP_LINEAR.
-     *
-     * Expected (GLES3 §8.17): every pixel `(255, 0, 0, 255)`.
-     * On `-gpu swiftshader`: every pixel `(0, 0, 0, 0)`.
+     * Render four color quadrants into an immutable RGBA8 texture, then read it
+     * back through the same flipped-FBO-blit shape used by Goodnotes Android
+     * snapshot recording.
      *
      * Returns "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>".
      */
