@@ -6,9 +6,8 @@
 //   * GL_TEXTURE_MIN_FILTER is explicitly GL_NEAREST, and
 //   * the FBO is checked for GL_FRAMEBUFFER_COMPLETE before drawing.
 //
-// The remaining draw is deliberately boring: bind one std140 UBO, generate a
-// full-screen triangle strip from gl_VertexID, output opaque red, and read exact
-// pixels back.
+// The remaining draw is deliberately boring: generate a full-screen triangle
+// strip from gl_VertexID, output opaque red, and read exact pixels back.
 
 #include "repro.h"
 
@@ -25,23 +24,13 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 #define SIZE 256
-#define QUAD_UNIFORMS_BINDING 0
-
 typedef struct {
     uint8_t r, g, b, a;
 } Pixel;
 
-// std140 vec4, exactly 16 bytes.
-typedef struct {
-    float scaleBias[4];
-} QuadUniforms;
-
 static const char* VERTEX_SHADER =
     "#version 300 es\n"
     "precision highp float;\n"
-    "layout(std140) uniform QuadUniforms {\n"
-    "  vec4 uScaleBias;\n"
-    "};\n"
     "const vec2 kPosition[4] = vec2[4](\n"
     "  vec2(-1.0, -1.0),\n"
     "  vec2( 1.0, -1.0),\n"
@@ -49,8 +38,7 @@ static const char* VERTEX_SHADER =
     "  vec2( 1.0,  1.0)\n"
     ");\n"
     "void main() {\n"
-    "  vec2 p = kPosition[gl_VertexID] * uScaleBias.xy + uScaleBias.zw;\n"
-    "  gl_Position = vec4(p, 0.0, 1.0);\n"
+    "  gl_Position = vec4(kPosition[gl_VertexID], 0.0, 1.0);\n"
     "}\n";
 
 static const char* FRAGMENT_SHADER =
@@ -174,24 +162,10 @@ static int validate_red(ReproStatus* s, const uint8_t* pixels) {
 static int draw_red_quad(ReproStatus* s, GLuint fbo) {
     GLuint program = 0;
     GLuint vao = 0;
-    GLuint ubo = 0;
 
     program = create_program(s);
     if (!program) return 0;
     glUseProgram(program);
-
-    GLuint block_index = glGetUniformBlockIndex(program, "QuadUniforms");
-    if (block_index == GL_INVALID_INDEX) {
-        set_err(s, "QuadUniforms block not found");
-        goto fail;
-    }
-    glUniformBlockBinding(program, block_index, QUAD_UNIFORMS_BINDING);
-
-    QuadUniforms uniforms = {{1.0f, 1.0f, 0.0f, 0.0f}};
-    glGenBuffers(1, &ubo);
-    glBindBuffer(GL_UNIFORM_BUFFER, ubo);
-    glBufferData(GL_UNIFORM_BUFFER, sizeof(uniforms), &uniforms, GL_STATIC_DRAW);
-    glBindBufferBase(GL_UNIFORM_BUFFER, QUAD_UNIFORMS_BINDING, ubo);
 
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
@@ -203,26 +177,22 @@ static int draw_red_quad(ReproStatus* s, GLuint fbo) {
     if (!check_gl(s, "glDrawArrays")) goto fail;
 
     glBindVertexArray(0);
-    glBindBuffer(GL_UNIFORM_BUFFER, 0);
     glUseProgram(0);
     glDeleteVertexArrays(1, &vao);
-    glDeleteBuffers(1, &ubo);
     glDeleteProgram(program);
     return 1;
 
 fail:
     glBindVertexArray(0);
-    glBindBuffer(GL_UNIFORM_BUFFER, 0);
     glUseProgram(0);
     if (vao) glDeleteVertexArrays(1, &vao);
-    if (ubo) glDeleteBuffers(1, &ubo);
     if (program) glDeleteProgram(program);
     return 0;
 }
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: immutable RGBA8 FBO + std140 UBO + gl_VertexID quad");
+    LOGI("repro_run_test: immutable RGBA8 FBO + gl_VertexID quad");
 
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;

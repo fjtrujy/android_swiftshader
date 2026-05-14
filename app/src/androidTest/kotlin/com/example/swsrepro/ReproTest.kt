@@ -10,8 +10,8 @@ import org.junit.runner.RunWith
  * Hard pass/fail assertion for the tiny valid GLES3 repro.
  *
  * Native code draws a solid red rectangle into a complete immutable RGBA8 render
- * target using one std140 UBO and a gl_VertexID-generated triangle strip, then
- * reads it directly with glReadPixels.
+ * target using a gl_VertexID-generated triangle strip, then reads it directly
+ * with glReadPixels.
  */
 @RunWith(AndroidJUnit4::class)
 class ReproTest {
@@ -23,7 +23,7 @@ class ReproTest {
     }
 
     @Test
-    fun validUboVertexIdQuadDrawsRedPixels() {
+    fun validVertexIdQuadDrawsRedPixels() {
         val pixels = ByteArray(ReproNative.WIDTH * ReproNative.HEIGHT * 4)
         val summary = ReproNative.parse(ReproNative.runTest(pixels))
         assertTrue(

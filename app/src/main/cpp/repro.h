@@ -13,8 +13,8 @@ typedef struct {
 } ReproStatus;
 
 // Draw a fullscreen red rectangle into a complete immutable, single-level RGBA8
-// render target using one std140 UBO and a gl_VertexID-generated triangle strip.
-// Then read pixels back directly with glReadPixels.
+// render target using a gl_VertexID-generated triangle strip. Then read pixels
+// back directly with glReadPixels.
 //
 // Expected: sampled pixels are (255, 0, 0, 255).
 // If direct `-gpu swiftshader` returns transparent black here while swangle is
