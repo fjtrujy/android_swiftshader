@@ -7,12 +7,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Hard pass/fail assertion for the Goodnotes Android snapshot readback shape.
+ * Hard pass/fail assertion for the smallest Goodnotes RendererV5 GLES shape.
  *
- * Native code renders four opaque quadrants into an immutable RGBA8 texture,
- * then mirrors the snapshot recorder: source texture attached to
- * READ_FRAMEBUFFER, Y-flipped glBlitFramebuffer into an RGBA8 renderbuffer,
- * glReadPixels into CPU memory.
+ * Native code draws a solid red rectangle into an immutable RGBA8 render target
+ * using a std140 UBO and gl_VertexID-generated triangle strip, then reads it
+ * through the Android snapshot path.
  */
 @RunWith(AndroidJUnit4::class)
 class ReproTest {
@@ -24,7 +23,7 @@ class ReproTest {
     }
 
     @Test
-    fun flippedFramebufferBlitPreservesPixels() {
+    fun rendererStyleUboRectangleDrawsRedPixels() {
         val pixels = ByteArray(ReproNative.WIDTH * ReproNative.HEIGHT * 4)
         val summary = ReproNative.parse(ReproNative.runTest(pixels))
         assertTrue(
@@ -32,32 +31,21 @@ class ReproTest {
             summary.success,
         )
 
-        val row0Left = pixelAt(pixels, 0, 0)
+        val expected = intArrayOf(255, 0, 0, 255)
+
+        val first = pixelAt(pixels, 0, 0)
         assertArrayEquals(
-            "row0-left should contain source top-left after flipped blit",
-            intArrayOf(0, 0, 255, 255),
-            row0Left,
+            "pixel (0, 0): expected ${expected.toList()}, got ${first.toList()}",
+            expected,
+            first,
         )
 
-        val row0Right = pixelAt(pixels, ReproNative.WIDTH - 1, 0)
+        val center = pixelAt(pixels, ReproNative.WIDTH / 2, ReproNative.HEIGHT / 2)
         assertArrayEquals(
-            "row0-right should contain source top-right after flipped blit",
-            intArrayOf(255, 255, 255, 255),
-            row0Right,
-        )
-
-        val lastRowLeft = pixelAt(pixels, 0, ReproNative.HEIGHT - 1)
-        assertArrayEquals(
-            "lastrow-left should contain source bottom-left after flipped blit",
-            intArrayOf(255, 0, 0, 255),
-            lastRowLeft,
-        )
-
-        val lastRowRight = pixelAt(pixels, ReproNative.WIDTH - 1, ReproNative.HEIGHT - 1)
-        assertArrayEquals(
-            "lastrow-right should contain source bottom-right after flipped blit",
-            intArrayOf(0, 255, 0, 255),
-            lastRowRight,
+            "pixel (${ReproNative.WIDTH / 2}, ${ReproNative.HEIGHT / 2}): " +
+                "expected ${expected.toList()}, got ${center.toList()}",
+            expected,
+            center,
         )
     }
 }

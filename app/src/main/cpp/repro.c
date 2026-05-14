@@ -1,18 +1,23 @@
-// SwiftShader Android-emulator render bug — Goodnotes snapshot readback probe.
+// SwiftShader Android-emulator render bug — Goodnotes-style UBO draw probe.
 //
-// This variant intentionally avoids the already-known immutable-texture
-// sampler bug by setting a non-mipmap min filter. It instead mirrors the
-// Android snapshot extraction path from Goodnotes:
+// This is intentionally tiny, but it mirrors the simplest RendererV5 path
+// closely:
 //
 //   1. Create a GLES3 pbuffer context.
-//   2. Allocate a single-level immutable RGBA8 texture with glTexStorage2D.
-//   3. Attach it to an FBO and clear four opaque color quadrants into it.
-//   4. Attach that texture as READ_FRAMEBUFFER, blit into a temporary RGBA8
-//      renderbuffer using swapped source Y coordinates, then glReadPixels.
+//   2. Allocate a single-level immutable RGBA8 render target with
+//      glTexStorage2D and set a non-mipmap min filter.
+//   3. Clear the target to transparent black.
+//   4. Draw a fullscreen red rectangle using the same ingredients as the
+//      RendererV5 colored-rectangle shader:
+//        - layout(std140) uniform DrawingUniforms
+//        - glBindBufferBase(GL_UNIFORM_BUFFER, 0, ubo)
+//        - gl_VertexID-generated triangle strip
+//        - no vertex attributes
+//   5. Read back pixels through the same flipped FBO blit shape used by the
+//      Android snapshot tests.
 //
-// If this comes back transparent black on direct `-gpu swiftshader`, the
-// empty Goodnotes Android recordings are likely in SwiftShader's FBO blit or
-// readback path rather than in source texture sampling.
+// If direct `-gpu swiftshader` returns transparent black while swangle returns
+// red, this is a small repro for the empty Goodnotes Android recordings.
 
 #include "repro.h"
 
@@ -21,6 +26,7 @@
 #include <GLES3/gl3.h>
 
 #include <android/log.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,10 +35,87 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 #define SIZE 256
+#define DRAWING_UNIFORMS_BINDING 0
 
 typedef struct {
     uint8_t r, g, b, a;
 } Pixel;
+
+// Mirrors RendererV5's DrawingUniforms std140 payload:
+// vec2 page size, vec2 camera pixel size, vec2 camera center, float scale,
+// float rotation. Total: 32 bytes.
+typedef struct {
+    float pageModelSize[2];
+    float cameraPixelSize[2];
+    float cameraModelCenter[2];
+    float cameraPixelFromModelScale;
+    float cameraRotation;
+} DrawingUniforms;
+
+static const char* VERTEX_SHADER =
+    "#version 300 es\n"
+    "precision highp float;\n"
+    "precision lowp int;\n"
+    "layout(std140) uniform DrawingUniforms {\n"
+    "  vec2 uPageModelSize;\n"
+    "  vec2 uCameraPixelSize;\n"
+    "  vec2 uCameraModelCenter;\n"
+    "  float uCameraPixelFromModelScale;\n"
+    "  float uCameraRotation;\n"
+    "};\n"
+    "uniform vec4 uModelFrame;\n"
+    "const ivec2 coordinatesIndices[4] = ivec2[4](\n"
+    "  ivec2(0, 1), ivec2(2, 1), ivec2(0, 3), ivec2(2, 3)\n"
+    ");\n"
+    "vec2 pixelFromModel(vec2 modelPosition,\n"
+    "                    vec2 pageModelSize,\n"
+    "                    vec2 cameraModelCenter,\n"
+    "                    float cameraPixelFromModelScale,\n"
+    "                    vec2 cameraPixelSize,\n"
+    "                    int cameraRotation) {\n"
+    "  vec2 pixelPositionOffsetFromCameraCenter =\n"
+    "      (modelPosition - cameraModelCenter) * cameraPixelFromModelScale;\n"
+    "  vec2 rotatedPixelPositionOffsetFromCenter;\n"
+    "  if (cameraRotation == 0) {\n"
+    "    rotatedPixelPositionOffsetFromCenter = pixelPositionOffsetFromCameraCenter;\n"
+    "  } else if (cameraRotation == 1) {\n"
+    "    rotatedPixelPositionOffsetFromCenter = vec2(\n"
+    "        pixelPositionOffsetFromCameraCenter.y,\n"
+    "        -pixelPositionOffsetFromCameraCenter.x);\n"
+    "  } else if (cameraRotation == 2) {\n"
+    "    rotatedPixelPositionOffsetFromCenter = -pixelPositionOffsetFromCameraCenter;\n"
+    "  } else {\n"
+    "    rotatedPixelPositionOffsetFromCenter = vec2(\n"
+    "        -pixelPositionOffsetFromCameraCenter.y,\n"
+    "        pixelPositionOffsetFromCameraCenter.x);\n"
+    "  }\n"
+    "  return rotatedPixelPositionOffsetFromCenter + cameraPixelSize / 2.0;\n"
+    "}\n"
+    "vec2 normalizedFromPixel(vec2 pixelPosition, vec2 cameraPixelSize) {\n"
+    "  vec2 normalizedPosition =\n"
+    "      (pixelPosition / cameraPixelSize - vec2(0.5)) * vec2(2.0);\n"
+    "  return vec2(normalizedPosition.x, -normalizedPosition.y);\n"
+    "}\n"
+    "void main() {\n"
+    "  ivec2 idx = coordinatesIndices[gl_VertexID];\n"
+    "  vec2 modelPosition = vec2(uModelFrame[idx.x], uModelFrame[idx.y]);\n"
+    "  vec2 pixelPosition = pixelFromModel(\n"
+    "      modelPosition,\n"
+    "      uPageModelSize,\n"
+    "      uCameraModelCenter,\n"
+    "      uCameraPixelFromModelScale,\n"
+    "      uCameraPixelSize,\n"
+    "      int(uCameraRotation));\n"
+    "  vec2 normalizedPosition = normalizedFromPixel(pixelPosition, uCameraPixelSize);\n"
+    "  gl_Position = vec4(normalizedPosition, 0.0, 1.0);\n"
+    "}\n";
+
+static const char* FRAGMENT_SHADER =
+    "#version 300 es\n"
+    "precision highp float;\n"
+    "uniform vec4 uColor;\n"
+    "out vec4 fColor;\n"
+    "void main() { fColor = uColor; }\n";
 
 static void set_err(ReproStatus* s, const char* msg) {
     s->success = 0;
@@ -60,6 +143,54 @@ static int check_fbo(ReproStatus* s, GLenum target, const char* where) {
     return 0;
 }
 
+static GLuint compile_shader(GLenum type, const char* source, ReproStatus* s) {
+    GLuint shader = glCreateShader(type);
+    glShaderSource(shader, 1, &source, NULL);
+    glCompileShader(shader);
+
+    GLint ok = 0;
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (ok) return shader;
+
+    char log[512] = {0};
+    glGetShaderInfoLog(shader, sizeof(log) - 1, NULL, log);
+    char buf[768];
+    snprintf(buf, sizeof(buf), "shader compile (type=0x%04X) failed: %s", type, log);
+    set_err(s, buf);
+    glDeleteShader(shader);
+    return 0;
+}
+
+static GLuint create_program(ReproStatus* s) {
+    GLuint vs = compile_shader(GL_VERTEX_SHADER, VERTEX_SHADER, s);
+    if (!vs) return 0;
+    GLuint fs = compile_shader(GL_FRAGMENT_SHADER, FRAGMENT_SHADER, s);
+    if (!fs) {
+        glDeleteShader(vs);
+        return 0;
+    }
+
+    GLuint program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+
+    GLint ok = 0;
+    glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok) return program;
+
+    char log[512] = {0};
+    glGetProgramInfoLog(program, sizeof(log) - 1, NULL, log);
+    char buf[768];
+    snprintf(buf, sizeof(buf), "program link failed: %s", log);
+    set_err(s, buf);
+    glDeleteProgram(program);
+    return 0;
+}
+
 static Pixel pixel_at(const uint8_t* pixels, int width, int x, int y) {
     size_t offset = ((size_t)y * (size_t)width + (size_t)x) * 4;
     Pixel p = {
@@ -72,81 +203,40 @@ static Pixel pixel_at(const uint8_t* pixels, int width, int x, int y) {
 }
 
 static void log_samples(const char* label, const uint8_t* pixels, int width, int height) {
-    Pixel bl = pixel_at(pixels, width, 0, 0);
-    Pixel br = pixel_at(pixels, width, width - 1, 0);
-    Pixel tl = pixel_at(pixels, width, 0, height - 1);
-    Pixel tr = pixel_at(pixels, width, width - 1, height - 1);
-    Pixel c = pixel_at(pixels, width, width / 2, height / 2);
-    LOGI("%s: row0-left=(%u,%u,%u,%u) row0-right=(%u,%u,%u,%u) "
-         "lastrow-left=(%u,%u,%u,%u) lastrow-right=(%u,%u,%u,%u) "
-         "center=(%u,%u,%u,%u)",
+    Pixel first = pixel_at(pixels, width, 0, 0);
+    Pixel center = pixel_at(pixels, width, width / 2, height / 2);
+    Pixel last = pixel_at(pixels, width, width - 1, height - 1);
+    LOGI("%s: first=(%u,%u,%u,%u) center=(%u,%u,%u,%u) last=(%u,%u,%u,%u)",
          label,
-         bl.r, bl.g, bl.b, bl.a,
-         br.r, br.g, br.b, br.a,
-         tl.r, tl.g, tl.b, tl.a,
-         tr.r, tr.g, tr.b, tr.a,
-         c.r, c.g, c.b, c.a);
+         first.r, first.g, first.b, first.a,
+         center.r, center.g, center.b, center.a,
+         last.r, last.g, last.b, last.a);
 }
 
-static int pixel_eq(Pixel actual, Pixel expected) {
-    return actual.r == expected.r &&
-           actual.g == expected.g &&
-           actual.b == expected.b &&
-           actual.a == expected.a;
-}
-
-static int validate_corners(ReproStatus* s, const char* label, const uint8_t* pixels,
-                            Pixel row0_left_expected, Pixel row0_right_expected,
-                            Pixel lastrow_left_expected, Pixel lastrow_right_expected) {
-    Pixel row0_left = pixel_at(pixels, SIZE, 0, 0);
-    Pixel row0_right = pixel_at(pixels, SIZE, SIZE - 1, 0);
-    Pixel lastrow_left = pixel_at(pixels, SIZE, 0, SIZE - 1);
-    Pixel lastrow_right = pixel_at(pixels, SIZE, SIZE - 1, SIZE - 1);
-
-    if (pixel_eq(row0_left, row0_left_expected) &&
-        pixel_eq(row0_right, row0_right_expected) &&
-        pixel_eq(lastrow_left, lastrow_left_expected) &&
-        pixel_eq(lastrow_right, lastrow_right_expected)) {
+static int validate_red(ReproStatus* s, const char* label, const uint8_t* pixels) {
+    Pixel first = pixel_at(pixels, SIZE, 0, 0);
+    Pixel center = pixel_at(pixels, SIZE, SIZE / 2, SIZE / 2);
+    Pixel last = pixel_at(pixels, SIZE, SIZE - 1, SIZE - 1);
+    if (first.r == 255 && first.g == 0 && first.b == 0 && first.a == 255 &&
+        center.r == 255 && center.g == 0 && center.b == 0 && center.a == 255 &&
+        last.r == 255 && last.g == 0 && last.b == 0 && last.a == 255) {
         return 1;
     }
 
     char buf[256];
     snprintf(
         buf, sizeof(buf),
-        "%s mismatch: row0-left=(%u,%u,%u,%u), row0-right=(%u,%u,%u,%u), "
-        "lastrow-left=(%u,%u,%u,%u), lastrow-right=(%u,%u,%u,%u)",
+        "%s mismatch: first=(%u,%u,%u,%u), center=(%u,%u,%u,%u), last=(%u,%u,%u,%u)",
         label,
-        row0_left.r, row0_left.g, row0_left.b, row0_left.a,
-        row0_right.r, row0_right.g, row0_right.b, row0_right.a,
-        lastrow_left.r, lastrow_left.g, lastrow_left.b, lastrow_left.a,
-        lastrow_right.r, lastrow_right.g, lastrow_right.b, lastrow_right.a
+        first.r, first.g, first.b, first.a,
+        center.r, center.g, center.b, center.a,
+        last.r, last.g, last.b, last.a
     );
     set_err(s, buf);
     return 0;
 }
 
-static void clear_rect(GLint x, GLint y, GLsizei width, GLsizei height,
-                       GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
-    glScissor(x, y, width, height);
-    glClearColor(r, g, b, a);
-    glClear(GL_COLOR_BUFFER_BIT);
-}
-
-static void fill_quadrants(GLuint framebuffer) {
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
-    glViewport(0, 0, SIZE, SIZE);
-    glEnable(GL_SCISSOR_TEST);
-
-    const GLsizei half = SIZE / 2;
-    clear_rect(0, 0, half, half, 1.f, 0.f, 0.f, 1.f);       // GL bottom-left: red
-    clear_rect(half, 0, half, half, 0.f, 1.f, 0.f, 1.f);    // GL bottom-right: green
-    clear_rect(0, half, half, half, 0.f, 0.f, 1.f, 1.f);    // GL top-left: blue
-    clear_rect(half, half, half, half, 1.f, 1.f, 1.f, 1.f); // GL top-right: white
-
-    glDisable(GL_SCISSOR_TEST);
-}
-
-static int read_source_direct(ReproStatus* s, GLuint source_fbo) {
+static int read_direct(ReproStatus* s, GLuint source_fbo) {
     uint8_t* direct = (uint8_t*)malloc((size_t)SIZE * (size_t)SIZE * 4);
     if (!direct) {
         set_err(s, "malloc direct buffer");
@@ -154,30 +244,23 @@ static int read_source_direct(ReproStatus* s, GLuint source_fbo) {
     }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, source_fbo);
-    if (!check_fbo(s, GL_READ_FRAMEBUFFER, "direct source read FBO")) {
+    if (!check_fbo(s, GL_READ_FRAMEBUFFER, "direct read FBO")) {
         free(direct);
         return 0;
     }
     glReadPixels(0, 0, SIZE, SIZE, GL_RGBA, GL_UNSIGNED_BYTE, direct);
-    if (!check_gl(s, "direct source glReadPixels")) {
+    if (!check_gl(s, "direct glReadPixels")) {
         free(direct);
         return 0;
     }
-    log_samples("direct source texture readback", direct, SIZE, SIZE);
-    int ok = validate_corners(
-        s,
-        "direct source texture readback",
-        direct,
-        (Pixel){255, 0, 0, 255},
-        (Pixel){0, 255, 0, 255},
-        (Pixel){0, 0, 255, 255},
-        (Pixel){255, 255, 255, 255}
-    );
+
+    log_samples("direct readback", direct, SIZE, SIZE);
+    int ok = validate_red(s, "direct readback", direct);
     free(direct);
     return ok;
 }
 
-static int blit_then_read(ReproStatus* s, GLuint source_fbo, uint8_t* pixels, int flip_y) {
+static int read_flipped(ReproStatus* s, GLuint source_fbo, uint8_t* pixels) {
     GLuint dst_rbo = 0;
     GLuint dst_fbo = 0;
 
@@ -187,75 +270,27 @@ static int blit_then_read(ReproStatus* s, GLuint source_fbo, uint8_t* pixels, in
 
     glGenFramebuffers(1, &dst_fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst_fbo);
-    glFramebufferRenderbuffer(
-        GL_DRAW_FRAMEBUFFER,
-        GL_COLOR_ATTACHMENT0,
-        GL_RENDERBUFFER,
-        dst_rbo
-    );
-    if (!check_fbo(s, GL_DRAW_FRAMEBUFFER, flip_y ? "flipped blit draw FBO" : "plain blit draw FBO")) {
-        goto fail;
-    }
+    glFramebufferRenderbuffer(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, dst_rbo);
+    if (!check_fbo(s, GL_DRAW_FRAMEBUFFER, "flipped blit draw FBO")) goto fail;
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, source_fbo);
-    if (!check_fbo(s, GL_READ_FRAMEBUFFER, flip_y ? "flipped blit read FBO" : "plain blit read FBO")) {
-        goto fail;
-    }
+    if (!check_fbo(s, GL_READ_FRAMEBUFFER, "flipped blit read FBO")) goto fail;
 
-    if (flip_y) {
-        glBlitFramebuffer(
-            0, SIZE, SIZE, 0,
-            0, 0, SIZE, SIZE,
-            GL_COLOR_BUFFER_BIT,
-            GL_NEAREST
-        );
-    } else {
-        glBlitFramebuffer(
-            0, 0, SIZE, SIZE,
-            0, 0, SIZE, SIZE,
-            GL_COLOR_BUFFER_BIT,
-            GL_NEAREST
-        );
-    }
-    if (!check_gl(s, flip_y ? "flipped glBlitFramebuffer" : "plain glBlitFramebuffer")) {
-        goto fail;
-    }
+    glBlitFramebuffer(
+        0, SIZE, SIZE, 0,
+        0, 0, SIZE, SIZE,
+        GL_COLOR_BUFFER_BIT,
+        GL_NEAREST
+    );
+    if (!check_gl(s, "flipped glBlitFramebuffer")) goto fail;
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, dst_fbo);
-    if (!check_fbo(s, GL_READ_FRAMEBUFFER, flip_y ? "flipped readback FBO" : "plain readback FBO")) {
-        goto fail;
-    }
+    if (!check_fbo(s, GL_READ_FRAMEBUFFER, "flipped readback FBO")) goto fail;
     glReadPixels(0, 0, SIZE, SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-    if (!check_gl(s, flip_y ? "flipped glReadPixels" : "plain glReadPixels")) {
-        goto fail;
-    }
+    if (!check_gl(s, "flipped glReadPixels")) goto fail;
 
-    log_samples(flip_y ? "flipped blit readback" : "plain blit readback", pixels, SIZE, SIZE);
-    if (flip_y) {
-        if (!validate_corners(
-            s,
-            "flipped blit readback",
-            pixels,
-            (Pixel){0, 0, 255, 255},
-            (Pixel){255, 255, 255, 255},
-            (Pixel){255, 0, 0, 255},
-            (Pixel){0, 255, 0, 255}
-        )) {
-            goto fail;
-        }
-    } else {
-        if (!validate_corners(
-            s,
-            "plain blit readback",
-            pixels,
-            (Pixel){255, 0, 0, 255},
-            (Pixel){0, 255, 0, 255},
-            (Pixel){0, 0, 255, 255},
-            (Pixel){255, 255, 255, 255}
-        )) {
-            goto fail;
-        }
-    }
+    log_samples("flipped readback", pixels, SIZE, SIZE);
+    if (!validate_red(s, "flipped readback", pixels)) goto fail;
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -273,15 +308,72 @@ fail:
     return 0;
 }
 
+static int draw_renderer_style_rectangle(ReproStatus* s, GLuint target_fbo) {
+    GLuint program = 0;
+    GLuint ubo = 0;
+
+    program = create_program(s);
+    if (!program) return 0;
+    glUseProgram(program);
+
+    GLuint block_index = glGetUniformBlockIndex(program, "DrawingUniforms");
+    if (block_index == GL_INVALID_INDEX) {
+        set_err(s, "DrawingUniforms block not found");
+        goto fail;
+    }
+    glUniformBlockBinding(program, block_index, DRAWING_UNIFORMS_BINDING);
+
+    DrawingUniforms uniforms = {
+        {SIZE, SIZE},
+        {SIZE, SIZE},
+        {SIZE / 2.0f, SIZE / 2.0f},
+        1.0f,
+        0.0f,
+    };
+    glGenBuffers(1, &ubo);
+    glBindBuffer(GL_UNIFORM_BUFFER, ubo);
+    glBufferData(GL_UNIFORM_BUFFER, sizeof(uniforms), &uniforms, GL_DYNAMIC_DRAW);
+    glBindBufferBase(GL_UNIFORM_BUFFER, DRAWING_UNIFORMS_BINDING, ubo);
+
+    GLint model_frame = glGetUniformLocation(program, "uModelFrame");
+    GLint color = glGetUniformLocation(program, "uColor");
+    if (model_frame < 0 || color < 0) {
+        set_err(s, "uniform lookup failed");
+        goto fail;
+    }
+
+    glUniform4f(model_frame, 0.0f, 0.0f, (float)SIZE, (float)SIZE);
+    glUniform4f(color, 1.0f, 0.0f, 0.0f, 1.0f);
+
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, target_fbo);
+    glViewport(0, 0, SIZE, SIZE);
+    glDisable(GL_BLEND);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    if (!check_gl(s, "renderer-style glDrawArrays")) goto fail;
+
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    glUseProgram(0);
+    glDeleteBuffers(1, &ubo);
+    glDeleteProgram(program);
+    return 1;
+
+fail:
+    glBindBuffer(GL_UNIFORM_BUFFER, 0);
+    glUseProgram(0);
+    if (ubo) glDeleteBuffers(1, &ubo);
+    if (program) glDeleteProgram(program);
+    return 0;
+}
+
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: immutable render target + FBO quadrant clears + Goodnotes-style flipped glBlitFramebuffer readback");
+    LOGI("repro_run_test: Goodnotes-style std140 UBO + gl_VertexID rectangle into immutable render target");
 
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLContext context = EGL_NO_CONTEXT;
     EGLSurface surface = EGL_NO_SURFACE;
-    GLuint render_tex = 0, source_fbo = 0;
+    GLuint render_tex = 0, fbo = 0;
 
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (display == EGL_NO_DISPLAY) { set_err(&s, "eglGetDisplay"); goto cleanup; }
@@ -322,31 +414,26 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     if (!check_gl(&s, "render texture setup")) goto cleanup;
 
-    glGenFramebuffers(1, &source_fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, source_fbo);
+    glGenFramebuffers(1, &fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, render_tex, 0);
-    if (!check_fbo(&s, GL_FRAMEBUFFER, "source render texture FBO")) goto cleanup;
+    if (!check_fbo(&s, GL_FRAMEBUFFER, "render target FBO")) goto cleanup;
 
-    fill_quadrants(source_fbo);
-    if (!check_gl(&s, "quadrant clears")) goto cleanup;
+    glViewport(0, 0, SIZE, SIZE);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!check_gl(&s, "transparent clear")) goto cleanup;
 
-    if (!read_source_direct(&s, source_fbo)) goto cleanup;
-
-    {
-        uint8_t* plain = (uint8_t*)malloc((size_t)SIZE * (size_t)SIZE * 4);
-        if (!plain) { set_err(&s, "malloc plain blit buffer"); goto cleanup; }
-        int ok = blit_then_read(&s, source_fbo, plain, 0);
-        free(plain);
-        if (!ok) goto cleanup;
-    }
-
-    if (!blit_then_read(&s, source_fbo, pixels, 1)) goto cleanup;
-
+    if (!draw_renderer_style_rectangle(&s, fbo)) goto cleanup;
     glFinish();
+
+    if (!read_direct(&s, fbo)) goto cleanup;
+    if (!read_flipped(&s, fbo, pixels)) goto cleanup;
+
     s.success = 1;
 
 cleanup:
-    if (source_fbo) glDeleteFramebuffers(1, &source_fbo);
+    if (fbo) glDeleteFramebuffers(1, &fbo);
     if (render_tex) glDeleteTextures(1, &render_tex);
     if (surface != EGL_NO_SURFACE) {
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

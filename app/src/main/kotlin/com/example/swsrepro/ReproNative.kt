@@ -7,9 +7,8 @@ object ReproNative {
     const val HEIGHT = 256
 
     /**
-     * Render four color quadrants into an immutable RGBA8 texture, then read it
-     * back through the same flipped-FBO-blit shape used by Goodnotes Android
-     * snapshot recording.
+     * Draw a red rectangle using the Goodnotes RendererV5 GLES shape: immutable
+     * render target, std140 UBO, and gl_VertexID-generated quad.
      *
      * Returns "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>".
      */

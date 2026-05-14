@@ -12,15 +12,14 @@ typedef struct {
     char error[256];
 } ReproStatus;
 
-// Render four opaque color quadrants into an immutable, single-level RGBA8
-// texture, then mirror the Goodnotes Android snapshot path: attach that texture
-// to READ_FRAMEBUFFER, blit into an RGBA8 renderbuffer with source Y flipped,
-// and glReadPixels back.
+// Draw a fullscreen red rectangle into an immutable, single-level RGBA8 render
+// target using the Goodnotes RendererV5 shape: std140 UBO, gl_VertexID-generated
+// triangle strip, and no vertex attributes. Then read pixels back through the
+// Android snapshot path.
 //
-// Expected row samples after the flipped blit:
-//   row0-left blue, row0-right white, lastrow-left red, lastrow-right green.
-// If direct `-gpu swiftshader` returns transparent black here, the Goodnotes
-// empty snapshot artifacts are likely in SwiftShader's FBO blit/readback path.
+// Expected: sampled pixels are (255, 0, 0, 255).
+// If direct `-gpu swiftshader` returns transparent black here while swangle is
+// red, this isolates the Goodnotes empty snapshot failure to a tiny GLES case.
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height);
 
 #endif
