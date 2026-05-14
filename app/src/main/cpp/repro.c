@@ -1,13 +1,8 @@
 // Tiny valid GLES3 repro for the Android emulator direct SwiftShader path.
 //
-// The old glTexStorage/default-mipmap-filter bug is intentionally out of the
-// picture here:
-//   * the render target is an immutable single-level GL_RGBA8 texture,
-//   * GL_TEXTURE_MIN_FILTER is explicitly GL_NEAREST, and
-//   * the FBO is checked for GL_FRAMEBUFFER_COMPLETE before drawing.
-//
-// The remaining draw is deliberately boring: generate a full-screen triangle
-// strip from gl_VertexID, output opaque red, and read exact pixels back.
+// The draw is deliberately boring: make a 256x256 EGL pbuffer current,
+// generate a full-screen triangle strip from gl_VertexID, output opaque red,
+// and read exact pixels back from the default framebuffer.
 
 #include "repro.h"
 
@@ -159,7 +154,7 @@ static int validate_red(ReproStatus* s, const uint8_t* pixels) {
     return 0;
 }
 
-static int draw_red_quad(ReproStatus* s, GLuint fbo) {
+static int draw_red_quad(ReproStatus* s) {
     GLuint program = 0;
     GLuint vao = 0;
 
@@ -170,7 +165,8 @@ static int draw_red_quad(ReproStatus* s, GLuint fbo) {
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!check_fbo(s, "default framebuffer")) goto fail;
     glViewport(0, 0, SIZE, SIZE);
     glDisable(GL_BLEND);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -192,14 +188,12 @@ fail:
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: immutable RGBA8 FBO + gl_VertexID quad");
+    LOGI("repro_run_test: EGL pbuffer default framebuffer + gl_VertexID quad");
 
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLContext context = EGL_NO_CONTEXT;
     EGLSurface surface = EGL_NO_SURFACE;
-    GLuint render_tex = 0;
-    GLuint fbo = 0;
 
     display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (display == EGL_NO_DISPLAY) { set_err(&s, "eglGetDisplay"); goto cleanup; }
@@ -221,7 +215,7 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
     if (context == EGL_NO_CONTEXT) { set_err(&s, "eglCreateContext"); goto cleanup; }
 
-    const EGLint pbuf_attribs[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+    const EGLint pbuf_attribs[] = { EGL_WIDTH, SIZE, EGL_HEIGHT, SIZE, EGL_NONE };
     surface = eglCreatePbufferSurface(display, config, pbuf_attribs);
     if (surface == EGL_NO_SURFACE) { set_err(&s, "eglCreatePbufferSurface"); goto cleanup; }
 
@@ -234,26 +228,14 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    glGenTextures(1, &render_tex);
-    glBindTexture(GL_TEXTURE_2D, render_tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SIZE, SIZE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    if (!check_gl(&s, "render texture setup")) goto cleanup;
-
-    glGenFramebuffers(1, &fbo);
-    glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, render_tex, 0);
-    if (!check_fbo(&s, "render target FBO")) goto cleanup;
-
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!check_fbo(&s, "default framebuffer")) goto cleanup;
     glViewport(0, 0, SIZE, SIZE);
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     if (!check_gl(&s, "transparent clear")) goto cleanup;
 
-    if (!draw_red_quad(&s, fbo)) goto cleanup;
+    if (!draw_red_quad(&s)) goto cleanup;
     glReadPixels(0, 0, SIZE, SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     if (!check_gl(&s, "glReadPixels")) goto cleanup;
     if (!validate_red(&s, pixels)) goto cleanup;
@@ -261,8 +243,6 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     s.success = 1;
 
 cleanup:
-    if (fbo) glDeleteFramebuffers(1, &fbo);
-    if (render_tex) glDeleteTextures(1, &render_tex);
     if (surface != EGL_NO_SURFACE) {
         eglMakeCurrent(display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroySurface(display, surface);

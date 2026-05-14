@@ -7,7 +7,7 @@ object ReproNative {
     const val HEIGHT = 256
 
     /**
-     * Draw a red rectangle using a complete immutable render target and a
+     * Draw a red rectangle into an EGL pbuffer default framebuffer using a
      * gl_VertexID-generated quad.
      *
      * Returns "<success>|<error>|<centerR,G,B,A>|<cornerR,G,B,A>".

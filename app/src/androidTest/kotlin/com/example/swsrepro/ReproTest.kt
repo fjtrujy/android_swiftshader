@@ -9,9 +9,9 @@ import org.junit.runner.RunWith
 /**
  * Hard pass/fail assertion for the tiny valid GLES3 repro.
  *
- * Native code draws a solid red rectangle into a complete immutable RGBA8 render
- * target using a gl_VertexID-generated triangle strip, then reads it directly
- * with glReadPixels.
+ * Native code draws a solid red rectangle into an EGL pbuffer default
+ * framebuffer using a gl_VertexID-generated triangle strip, then reads it
+ * directly with glReadPixels.
  */
 @RunWith(AndroidJUnit4::class)
 class ReproTest {
