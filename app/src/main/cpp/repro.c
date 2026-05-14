@@ -88,6 +88,43 @@ static void log_samples(const char* label, const uint8_t* pixels, int width, int
          c.r, c.g, c.b, c.a);
 }
 
+static int pixel_eq(Pixel actual, Pixel expected) {
+    return actual.r == expected.r &&
+           actual.g == expected.g &&
+           actual.b == expected.b &&
+           actual.a == expected.a;
+}
+
+static int validate_corners(ReproStatus* s, const char* label, const uint8_t* pixels,
+                            Pixel row0_left_expected, Pixel row0_right_expected,
+                            Pixel lastrow_left_expected, Pixel lastrow_right_expected) {
+    Pixel row0_left = pixel_at(pixels, SIZE, 0, 0);
+    Pixel row0_right = pixel_at(pixels, SIZE, SIZE - 1, 0);
+    Pixel lastrow_left = pixel_at(pixels, SIZE, 0, SIZE - 1);
+    Pixel lastrow_right = pixel_at(pixels, SIZE, SIZE - 1, SIZE - 1);
+
+    if (pixel_eq(row0_left, row0_left_expected) &&
+        pixel_eq(row0_right, row0_right_expected) &&
+        pixel_eq(lastrow_left, lastrow_left_expected) &&
+        pixel_eq(lastrow_right, lastrow_right_expected)) {
+        return 1;
+    }
+
+    char buf[256];
+    snprintf(
+        buf, sizeof(buf),
+        "%s mismatch: row0-left=(%u,%u,%u,%u), row0-right=(%u,%u,%u,%u), "
+        "lastrow-left=(%u,%u,%u,%u), lastrow-right=(%u,%u,%u,%u)",
+        label,
+        row0_left.r, row0_left.g, row0_left.b, row0_left.a,
+        row0_right.r, row0_right.g, row0_right.b, row0_right.a,
+        lastrow_left.r, lastrow_left.g, lastrow_left.b, lastrow_left.a,
+        lastrow_right.r, lastrow_right.g, lastrow_right.b, lastrow_right.a
+    );
+    set_err(s, buf);
+    return 0;
+}
+
 static void clear_rect(GLint x, GLint y, GLsizei width, GLsizei height,
                        GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
     glScissor(x, y, width, height);
@@ -127,8 +164,17 @@ static int read_source_direct(ReproStatus* s, GLuint source_fbo) {
         return 0;
     }
     log_samples("direct source texture readback", direct, SIZE, SIZE);
+    int ok = validate_corners(
+        s,
+        "direct source texture readback",
+        direct,
+        (Pixel){255, 0, 0, 255},
+        (Pixel){0, 255, 0, 255},
+        (Pixel){0, 0, 255, 255},
+        (Pixel){255, 255, 255, 255}
+    );
     free(direct);
-    return 1;
+    return ok;
 }
 
 static int blit_then_read(ReproStatus* s, GLuint source_fbo, uint8_t* pixels, int flip_y) {
@@ -185,6 +231,31 @@ static int blit_then_read(ReproStatus* s, GLuint source_fbo, uint8_t* pixels, in
     }
 
     log_samples(flip_y ? "flipped blit readback" : "plain blit readback", pixels, SIZE, SIZE);
+    if (flip_y) {
+        if (!validate_corners(
+            s,
+            "flipped blit readback",
+            pixels,
+            (Pixel){0, 0, 255, 255},
+            (Pixel){255, 255, 255, 255},
+            (Pixel){255, 0, 0, 255},
+            (Pixel){0, 255, 0, 255}
+        )) {
+            goto fail;
+        }
+    } else {
+        if (!validate_corners(
+            s,
+            "plain blit readback",
+            pixels,
+            (Pixel){255, 0, 0, 255},
+            (Pixel){0, 255, 0, 255},
+            (Pixel){0, 0, 255, 255},
+            (Pixel){255, 255, 255, 255}
+        )) {
+            goto fail;
+        }
+    }
 
     glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
