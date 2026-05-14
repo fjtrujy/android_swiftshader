@@ -1,11 +1,18 @@
-// SwiftShader Android-emulator render bug — minimal repro.
+// SwiftShader Android-emulator render bug — TESTING WORKAROUND.
+//
+// This branch is NOT the bug demonstration; it tests whether explicitly
+// setting GL_TEXTURE_MIN_FILTER = GL_NEAREST after the texture upload
+// makes the test pass on `-gpu swiftshader`. The unmodified repro on
+// `main` leaves the min filter at the default GL_NEAREST_MIPMAP_LINEAR
+// and fails on swiftshader because SwiftShader incorrectly treats the
+// 1-level immutable texture as incomplete. See main's README for the
+// full bug description.
 //
 // Sequence (entirely on the main thread):
 //   1. Bring up GLES3 + 1x1 pbuffer surface.
 //   2. Create an IMMUTABLE 256x256 RGBA8 source texture via glTexStorage2D
 //      with 1 mipmap level. Upload opaque red via glTexSubImage2D from a
-//      CPU buffer. Do NOT call glTexParameteri — leave the default
-//      min filter (GL_NEAREST_MIPMAP_LINEAR).
+//      CPU buffer. Override the default min filter with GL_NEAREST.
 //   3. Create a 256x256 RGBA8 destination texture + FBO. Clear to a
 //      sentinel BLUE so "draw didn't run" is distinguishable from
 //      "sample returned zero".
@@ -13,21 +20,9 @@
 //      sampling the source texture into the FBO.
 //   5. glReadPixels back.
 //
-// Expected output per GLES3 spec section 8.17 (immutable textures are
-// always complete): every pixel `(255, 0, 0, 255)`.
-//
-// Actual:
-//   - `-gpu swangle` (ANGLE → Vulkan → SwiftShader-Vulkan): red ✅.
-//   - `-gpu swiftshader`: `(0, 0, 0, 0)` ❌. Two spec violations stacked:
-//     a) SwiftShader treats the 1-level immutable texture as incomplete
-//        because the default min filter is mipmap-aware. GLES3 §8.17
-//        says immutable textures are always complete.
-//     b) Sampling an incomplete texture returns (0, 0, 0, 0). GLES3
-//        §8.17 requires (0, 0, 0, 1) for float texture types.
-//
-// Client workaround: call
-//   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-// (or any non-mipmap-aware filter) after creating the source texture.
+// Expected with the workaround applied: every pixel `(255, 0, 0, 255)`
+// on BOTH `-gpu swangle` and `-gpu swiftshader`. If the swiftshader CI
+// job still fails on this branch, the workaround does not fix the bug.
 
 #include "repro.h"
 
@@ -97,7 +92,7 @@ static const char* FS_SRC =
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D; default mipmap min filter");
+    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D; workaround = GL_NEAREST min filter");
 
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;
@@ -136,10 +131,11 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // *** THE BUG ***
-    // Immutable, single-level RGBA8 texture filled with opaque red.
-    // No glTexParameteri — default min filter is GL_NEAREST_MIPMAP_LINEAR.
-    // GLES3 §8.17 says this is complete; SwiftShader treats it as incomplete.
+    // *** TESTING WORKAROUND: explicit non-mipmap min filter ***
+    // Immutable, single-level RGBA8 texture filled with opaque red, then
+    // override the default GL_NEAREST_MIPMAP_LINEAR min filter with
+    // GL_NEAREST. The default trips SwiftShader's (buggy) mipmap-aware
+    // completeness check; GL_NEAREST sidesteps it entirely.
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
     glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SIZE, SIZE);
@@ -154,6 +150,7 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
                         GL_RGBA, GL_UNSIGNED_BYTE, cpu);
         free(cpu);
     }
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     if (!check_gl(&s, "src texture setup")) goto cleanup;
 
     // Destination FBO. Clear to BLUE so "draw didn't run" is visually distinct
