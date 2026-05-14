@@ -12,14 +12,14 @@ typedef struct {
     char error[256];
 } ReproStatus;
 
-// Draw a fullscreen red rectangle into an immutable, single-level RGBA8 render
-// target using the Goodnotes RendererV5 shape: std140 UBO, gl_VertexID-generated
-// triangle strip, and no vertex attributes. Then read pixels back through the
-// Android snapshot path.
+// Draw a fullscreen red rectangle into a complete immutable, single-level RGBA8
+// render target using one std140 UBO and a gl_VertexID-generated triangle strip.
+// Then read pixels back directly with glReadPixels.
 //
 // Expected: sampled pixels are (255, 0, 0, 255).
 // If direct `-gpu swiftshader` returns transparent black here while swangle is
-// red, this isolates the Goodnotes empty snapshot failure to a tiny GLES case.
+// red, this isolates the Goodnotes empty renderer output to a tiny valid GLES3
+// case that does not rely on incomplete texture sampling.
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height);
 
 #endif

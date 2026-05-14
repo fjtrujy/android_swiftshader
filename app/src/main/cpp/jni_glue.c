@@ -1,5 +1,5 @@
 // JNI surface. Kotlin sees a single method on ReproNative:
-//   runTest(outPixels) -> shared-context cross-thread upload + sample.
+//   runTest(outPixels) -> tiny valid GLES3 UBO/gl_VertexID draw + readback.
 
 #include "repro.h"
 
