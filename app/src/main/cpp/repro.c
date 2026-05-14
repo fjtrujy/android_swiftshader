@@ -1,18 +1,19 @@
 // SwiftShader Android-emulator render bug — TESTING WORKAROUND.
 //
-// This branch is NOT the bug demonstration; it tests whether explicitly
-// setting GL_TEXTURE_MIN_FILTER = GL_NEAREST after the texture upload
-// makes the test pass on `-gpu swiftshader`. The unmodified repro on
-// `main` leaves the min filter at the default GL_NEAREST_MIPMAP_LINEAR
-// and fails on swiftshader because SwiftShader incorrectly treats the
-// 1-level immutable texture as incomplete. See main's README for the
-// full bug description.
+// This branch is NOT the bug demonstration; it tests whether allocating
+// the full mipmap chain (floor(log2(SIZE))+1 levels) and filling levels
+// 1..N-1 via glGenerateMipmap makes the test pass on `-gpu swiftshader`.
+// The unmodified repro on `main` allocates 1 level and fails on
+// swiftshader because SwiftShader incorrectly treats the 1-level
+// immutable texture as incomplete under the default mipmap-aware min
+// filter. See main's README for the full bug description.
 //
 // Sequence (entirely on the main thread):
 //   1. Bring up GLES3 + 1x1 pbuffer surface.
 //   2. Create an IMMUTABLE 256x256 RGBA8 source texture via glTexStorage2D
-//      with 1 mipmap level. Upload opaque red via glTexSubImage2D from a
-//      CPU buffer. Override the default min filter with GL_NEAREST.
+//      with the full mipmap chain (9 levels). Upload opaque red into
+//      level 0 via glTexSubImage2D. Fill levels 1..8 with glGenerateMipmap.
+//      Leave the default mipmap-aware min filter in place.
 //   3. Create a 256x256 RGBA8 destination texture + FBO. Clear to a
 //      sentinel BLUE so "draw didn't run" is distinguishable from
 //      "sample returned zero".
@@ -39,6 +40,13 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 #define SIZE 256
+
+// floor(log2(size)) + 1 — the full mipmap chain length for a square texture.
+static int mip_levels_for(int size) {
+    int levels = 1;
+    while (size > 1) { size >>= 1; levels++; }
+    return levels;
+}
 
 static void set_err(ReproStatus* s, const char* msg) {
     s->success = 0;
@@ -92,7 +100,7 @@ static const char* FS_SRC =
 
 ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     (void)width; (void)height;
-    LOGI("repro_run_test: glTexStorage2D (immutable, 1 level) + glTexSubImage2D; workaround = GL_NEAREST min filter");
+    LOGI("repro_run_test: glTexStorage2D (immutable, full mipmap chain) + glTexSubImage2D + glGenerateMipmap; default mipmap min filter");
 
     ReproStatus s = {0};
     EGLDisplay display = EGL_NO_DISPLAY;
@@ -131,14 +139,17 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    // *** TESTING WORKAROUND: explicit non-mipmap min filter ***
-    // Immutable, single-level RGBA8 texture filled with opaque red, then
-    // override the default GL_NEAREST_MIPMAP_LINEAR min filter with
-    // GL_NEAREST. The default trips SwiftShader's (buggy) mipmap-aware
-    // completeness check; GL_NEAREST sidesteps it entirely.
+    // *** TESTING WORKAROUND: full mipmap chain + glGenerateMipmap ***
+    // Immutable RGBA8 texture allocated with the full mipmap chain
+    // (floor(log2(SIZE))+1 levels = 9 for SIZE=256). Upload opaque red
+    // into level 0; let glGenerateMipmap fill levels 1..N-1. The default
+    // GL_NEAREST_MIPMAP_LINEAR min filter then has all the levels it
+    // asks for, so the completeness check passes even on SwiftShader's
+    // (buggy) non-immutable-aware path.
+    int levels = mip_levels_for(SIZE);
     glGenTextures(1, &src_tex);
     glBindTexture(GL_TEXTURE_2D, src_tex);
-    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, SIZE, SIZE);
+    glTexStorage2D(GL_TEXTURE_2D, levels, GL_RGBA8, SIZE, SIZE);
     {
         size_t byteSize = (size_t)SIZE * (size_t)SIZE * 4;
         uint8_t* cpu = (uint8_t*)malloc(byteSize);
@@ -150,7 +161,7 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
                         GL_RGBA, GL_UNSIGNED_BYTE, cpu);
         free(cpu);
     }
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glGenerateMipmap(GL_TEXTURE_2D);
     if (!check_gl(&s, "src texture setup")) goto cleanup;
 
     // Destination FBO. Clear to BLUE so "draw didn't run" is visually distinct
