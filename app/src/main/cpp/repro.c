@@ -68,6 +68,46 @@ static int check_fbo(ReproStatus* s, const char* where) {
     return 0;
 }
 
+static void log_egl_config(EGLDisplay display, EGLConfig config) {
+    EGLint surface_type = 0;
+    EGLint renderable_type = 0;
+    EGLint conformant = 0;
+    EGLint red = 0, green = 0, blue = 0, alpha = 0;
+    EGLint sample_buffers = 0, samples = 0;
+
+    eglGetConfigAttrib(display, config, EGL_SURFACE_TYPE, &surface_type);
+    eglGetConfigAttrib(display, config, EGL_RENDERABLE_TYPE, &renderable_type);
+    eglGetConfigAttrib(display, config, EGL_CONFORMANT, &conformant);
+    eglGetConfigAttrib(display, config, EGL_RED_SIZE, &red);
+    eglGetConfigAttrib(display, config, EGL_GREEN_SIZE, &green);
+    eglGetConfigAttrib(display, config, EGL_BLUE_SIZE, &blue);
+    eglGetConfigAttrib(display, config, EGL_ALPHA_SIZE, &alpha);
+    eglGetConfigAttrib(display, config, EGL_SAMPLE_BUFFERS, &sample_buffers);
+    eglGetConfigAttrib(display, config, EGL_SAMPLES, &samples);
+
+    LOGI("EGL config: surface=0x%04X renderable=0x%04X conformant=0x%04X "
+         "rgba=(%d,%d,%d,%d) sampleBuffers=%d samples=%d",
+         surface_type, renderable_type, conformant,
+         red, green, blue, alpha, sample_buffers, samples);
+}
+
+static int configure_default_framebuffer(ReproStatus* s, const char* where) {
+    const GLenum back = GL_BACK;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (!check_fbo(s, where)) return 0;
+
+    glDrawBuffers(1, &back);
+    glReadBuffer(GL_BACK);
+    glViewport(0, 0, SIZE, SIZE);
+    glDisable(GL_SCISSOR_TEST);
+    glDisable(GL_DITHER);
+    glDisable(GL_BLEND);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+    return check_gl(s, where);
+}
+
 static GLuint compile_shader(GLenum type, const char* source, ReproStatus* s) {
     GLuint shader = glCreateShader(type);
     glShaderSource(shader, 1, &source, NULL);
@@ -165,10 +205,7 @@ static int draw_red_quad(ReproStatus* s) {
     glGenVertexArrays(1, &vao);
     glBindVertexArray(vao);
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    if (!check_fbo(s, "default framebuffer")) goto fail;
-    glViewport(0, 0, SIZE, SIZE);
-    glDisable(GL_BLEND);
+    if (!configure_default_framebuffer(s, "draw default framebuffer")) goto fail;
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     if (!check_gl(s, "glDrawArrays")) goto fail;
 
@@ -202,7 +239,9 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     const EGLint cfg_attribs[] = {
         EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_CONFORMANT,      EGL_OPENGL_ES3_BIT,
         EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_SAMPLE_BUFFERS, 0,
         EGL_NONE
     };
     EGLConfig config;
@@ -210,6 +249,7 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
     if (!eglChooseConfig(display, cfg_attribs, &config, 1, &num_configs) || num_configs < 1) {
         set_err(&s, "eglChooseConfig"); goto cleanup;
     }
+    log_egl_config(display, config);
 
     const EGLint ctx_attribs[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
     context = eglCreateContext(display, config, EGL_NO_CONTEXT, ctx_attribs);
@@ -228,9 +268,7 @@ ReproStatus repro_run_test(uint8_t* pixels, int width, int height) {
          (const char*)glGetString(GL_RENDERER),
          (const char*)glGetString(GL_VERSION));
 
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    if (!check_fbo(&s, "default framebuffer")) goto cleanup;
-    glViewport(0, 0, SIZE, SIZE);
+    if (!configure_default_framebuffer(&s, "clear default framebuffer")) goto cleanup;
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     if (!check_gl(&s, "transparent clear")) goto cleanup;
